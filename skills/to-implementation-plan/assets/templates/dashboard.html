@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="refresh" content="10" />
+    <title>Plan progress</title>
+    <!-- Fallback dashboard. dashboard-builder replaces this with a page shaped for the plan; the data
+     contract is window.DASH, written by the skill's assets/dashboard.js into data.js next to this file. -->
+    <script src="data.js"></script>
+    <style>
+      :root {
+        --bg: #0f1012;
+        --panel: #17181b;
+        --line: #25262b;
+        --text: #e7e5e0;
+        --muted: #8d8b86;
+        --accent: #f5a524;
+        --accent-soft: rgba(245, 165, 36, 0.14);
+        --ok: #5fb87a;
+        --warn: #f5a524;
+        --bad: #e5645a;
+        --idle: #6b6a66;
+        --radius: 14px;
+        --gap: 28px;
+        font:
+          15px/1.55 ui-sans-serif,
+          -apple-system,
+          'Inter',
+          'Segoe UI',
+          sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+      }
+      main {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 48px 24px 80px;
+      }
+      header {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: flex-end;
+        flex-wrap: wrap;
+      }
+      h1 {
+        font-size: 26px;
+        font-weight: 600;
+        margin: 0 0 6px;
+        letter-spacing: -0.01em;
+      }
+      h2 {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--muted);
+        margin: 0 0 16px;
+      }
+      .goal {
+        color: var(--muted);
+        max-width: 70ch;
+        margin: 0;
+      }
+      .clock {
+        text-align: right;
+        color: var(--muted);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+      .clock b {
+        color: var(--text);
+        font-weight: 500;
+      }
+      .stale {
+        color: var(--bad) !important;
+      }
+      .kpis {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        gap: 16px;
+        margin: 40px 0;
+      }
+      .kpi {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 20px 22px;
+      }
+      .kpi .n {
+        font-size: 30px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+      }
+      .kpi .l {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .kpi.hot {
+        border-color: var(--accent);
+        background: var(--accent-soft);
+      }
+      .bar {
+        height: 6px;
+        background: var(--line);
+        border-radius: 99px;
+        overflow: hidden;
+        margin-top: 12px;
+      }
+      .bar > i {
+        display: block;
+        height: 100%;
+        background: var(--accent);
+        border-radius: 99px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1.4fr 1fr;
+        gap: var(--gap);
+      }
+      @media (max-width: 860px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+        .clock {
+          text-align: left;
+        }
+      }
+      section {
+        margin-bottom: var(--gap);
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius);
+        padding: 18px 20px;
+        margin-bottom: 12px;
+      }
+      .q {
+        border-left: 3px solid var(--accent);
+      }
+      .q .def {
+        margin-top: 10px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .q .def b {
+        color: var(--accent);
+        font-weight: 500;
+      }
+      .stuck {
+        border-left: 3px solid var(--bad);
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin-top: 6px;
+        font-variant-numeric: tabular-nums;
+      }
+      .empty {
+        color: var(--idle);
+        font-size: 14px;
+        padding: 4px 0 8px;
+      }
+      .t {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 4px 16px;
+      }
+      .t .title {
+        font-weight: 500;
+      }
+      .pill {
+        font-size: 11.5px;
+        padding: 3px 10px;
+        border-radius: 99px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        white-space: nowrap;
+        align-self: start;
+      }
+      .s-in-progress {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      .s-done {
+        color: var(--ok);
+        border-color: rgba(95, 184, 122, 0.4);
+      }
+      .s-blocked,
+      .s-parked {
+        color: var(--idle);
+      }
+      .s-ready {
+        color: var(--text);
+      }
+      .front {
+        box-shadow: inset 0 0 0 1px var(--accent-soft);
+      }
+      .next {
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: 6px;
+      }
+      ul.plain {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      ul.plain li {
+        padding: 8px 0;
+        border-bottom: 1px solid var(--line);
+        font-size: 14px;
+      }
+      ul.plain li:last-child {
+        border: 0;
+      }
+      code {
+        font:
+          12.5px ui-monospace,
+          'SF Mono',
+          Menlo,
+          monospace;
+        color: var(--muted);
+      }
+    </style>
+  </head>
+  <body>
+    <main id="app">
+      <p class="empty">
+        No data.js yet. Run
+        <code
+          >node .agents/skills/to-implementation-plan/assets/dashboard.js --scope &lt;plan
+          folder&gt;</code
+        >
+        from the repo root.
+      </p>
+    </main>
+    <script>
+      ;(() => {
+        const D = window.DASH
+        if (!D) return
+        const esc = s =>
+          String(s ?? '').replace(
+            /[&<>"]/g,
+            c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c],
+          )
+        const ago = iso => {
+          if (!iso) return ''
+          const s = Math.round((Date.now() - new Date(iso)) / 1000)
+          if (s < 60) return `${s}s ago`
+          if (s < 3600) return `${Math.round(s / 60)}m ago`
+          if (s < 86400) return `${Math.round(s / 3600)}h ago`
+          return `${Math.round(s / 86400)}d ago`
+        }
+        const time = iso =>
+          iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+        const pct = (a, b) => (b ? Math.round((a / b) * 100) : 0)
+        const openQ = D.questions.filter(q => !q.answeredAt)
+        const stuck = D.stuck.filter(s => !s.resolvedAt)
+        const humanWaits = D.tickets.filter(
+          t => t.waitingOnHuman.length && !['done', 'parked'].includes(t.status),
+        )
+        const live = D.agents.filter(a => !['merged', 'gone'].includes(a.state))
+        const staleSecs = (Date.now() - new Date(D.generatedAt)) / 1000
+        const order = { 'in-progress': 0, ready: 1, blocked: 2, parked: 3, done: 4 }
+        const tickets = [...D.tickets].sort(
+          (a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9),
+        )
+        const done = D.counts.done || 0
+
+        const ticketCard = t => `
+    <div class="card t ${t.frontier ? 'front' : ''}">
+      <div class="title">${esc(t.title)}${D.nextUp === t.id ? ' <span class="pill s-in-progress">next up</span>' : ''}</div>
+      <span class="pill s-${esc(t.status)}">${esc(t.status)}${t.frontier && t.status !== 'ready' ? ' · takeable' : ''}</span>
+      <div style="grid-column:1/-1">
+        ${
+          t.tasksTotal
+            ? `<div class="bar"><i style="width:${pct(t.tasksDone, t.tasksTotal)}%"></i></div>
+        <div class="meta">${t.tasksDone}/${t.tasksTotal} tasks · touched ${ago(t.modifiedAt)}</div>`
+            : ''
+        }
+        ${t.status === 'in-progress' && t.nextTask ? `<div class="next">Now: ${esc(t.nextTask)}</div>` : ''}
+        ${t.openBlockers.length ? `<div class="meta">waits on ${t.openBlockers.map(esc).join(', ')}</div>` : ''}
+        ${t.status === 'done' && t.gist ? `<div class="meta">${esc(t.gist)}</div>` : ''}
+      </div>
+    </div>`
+
+        document.getElementById('app').innerHTML = `
+    <header>
+      <div><h1>${esc(D.spec.title)}</h1>${D.spec.goal ? `<p class="goal">${esc(D.spec.goal)}</p>` : ''}</div>
+      <div class="clock">
+        <div>data <b class="${staleSecs > 300 ? 'stale' : ''}">${time(D.generatedAt)}</b> · ${ago(D.generatedAt)}</div>
+        <div>now <b>${time(new Date().toISOString())}</b> · refreshes every 10s</div>
+      </div>
+    </header>
+
+    <div class="kpis">
+      <div class="kpi"><div class="n">${done}/${D.counts.total}</div><div class="l">tickets done</div>
+        <div class="bar"><i style="width:${pct(done, D.counts.total)}%"></i></div></div>
+      <div class="kpi"><div class="n">${D.tasks.done}/${D.tasks.total}</div><div class="l">tasks ticked</div>
+        <div class="bar"><i style="width:${pct(D.tasks.done, D.tasks.total)}%"></i></div></div>
+      <div class="kpi"><div class="n">${D.counts['in-progress'] || 0}</div><div class="l">in progress · ${D.frontier.length} takeable</div></div>
+      <div class="kpi ${openQ.length ? 'hot' : ''}"><div class="n">${openQ.length}</div><div class="l">questions for you</div></div>
+    </div>
+
+    <div class="grid">
+      <div>
+        <section><h2>Questions waiting on you</h2>
+          ${
+            openQ.length
+              ? openQ
+                  .map(
+                    q => `<div class="card q">
+            <div>${esc(q.question)}</div>
+            <div class="def">If you don't answer: <b>${esc(q.default)}</b></div>
+            <div class="meta">${esc(q.id)}${q.ticket ? ` · ${esc(q.ticket)}` : ''} · asked ${ago(q.askedAt)}</div>
+          </div>`,
+                  )
+                  .join('')
+              : '<div class="empty">Nothing waiting on you.</div>'
+          }
+        </section>
+        <section><h2>Tickets</h2>${tickets.map(ticketCard).join('')}</section>
+      </div>
+      <div>
+        <section><h2>Stuck</h2>
+          ${
+            stuck.length || humanWaits.length
+              ? [
+                  ...stuck.map(
+                    s => `<div class="card stuck"><div>${esc(s.what)}</div>
+              <div class="meta">${s.ticket ? `${esc(s.ticket)} · ` : ''}since ${ago(s.since)}</div></div>`,
+                  ),
+                  ...humanWaits.map(
+                    t => `<div class="card stuck"><div>${esc(t.title)}</div>
+              <div class="meta">needs you: ${t.waitingOnHuman.map(esc).join('; ')}</div></div>`,
+                  ),
+                ].join('')
+              : '<div class="empty">Nothing stuck.</div>'
+          }
+        </section>
+        ${
+          D.agents.length
+            ? `<section><h2>Subagents</h2><ul class="plain">${D.agents
+                .map(
+                  a => `<li>
+          <span class="pill ${live.includes(a) ? 's-in-progress' : 's-done'}">${esc(a.state)}</span> ${esc(a.ticket)}
+          <div class="meta">${a.note ? `${esc(a.note)} · ` : ''}${ago(a.since)}</div></li>`,
+                )
+                .join('')}</ul></section>`
+            : ''
+        }
+        <section><h2>Latest deliverables</h2><ul class="plain">
+          ${D.commits.length ? D.commits.map(c => `<li>${esc(c.subject)}<div class="meta"><code>${esc(c.hash)}</code> · ${ago(c.at)}</div></li>`).join('') : '<li class="empty">No commits yet.</li>'}
+        </ul></section>
+        <section><h2>Activity</h2><ul class="plain">
+          ${
+            D.log.length
+              ? [...D.log]
+                  .reverse()
+                  .slice(0, 12)
+                  .map(
+                    l =>
+                      `<li>${esc(l.text)}<div class="meta">${time(l.at)} · ${ago(l.at)}</div></li>`,
+                  )
+                  .join('')
+              : '<li class="empty">No activity logged.</li>'
+          }
+        </ul></section>
+      </div>
+    </div>`
+      })()
+    </script>
+  </body>
+</html>
