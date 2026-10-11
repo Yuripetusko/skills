@@ -8,7 +8,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { decide } from '../hooks/pre-tool.mjs'
+import { decide, globToRegExp } from '../hooks/pre-tool.mjs'
+import { globToRegExp as jobsGlob } from '../jobs.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const HOOKS = path.join(HERE, '..', 'hooks')
@@ -207,4 +208,79 @@ test('write rules: a write tool without a target path is denied when rules apply
   assert.equal(decide(call, IMPLEMENT).rule, 'no-target')
   assert.equal(decide(call, { ...TASK, readOnly: true }).rule, 'read-only')
   assert.equal(decide(call, TASK).decision, 'allow')
+})
+
+// Regressions from the review of the first version.
+
+const write = (ctx, target, state = {}) =>
+  decide(
+    { name: 'write_to_file', args: { TargetFile: target } },
+    { mode: 'implement', worktree: ctx.worktree, paths: ['src/**'], ...state },
+  )
+
+test('symlinks: a dangling link out of the worktree is denied', () => {
+  const ctx = makeJob()
+  fs.symlinkSync(path.join(ctx.root, 'outside', 'new.ts'), path.join(ctx.worktree, 'src', 'new.ts'))
+  assert.equal(write(ctx, path.join(ctx.worktree, 'src', 'new.ts')).rule, 'outside-worktree')
+  assert.equal(write(ctx, 'src/new.ts').rule, 'outside-worktree')
+})
+
+test('symlinks: `..` after a linked directory follows the link first', () => {
+  const ctx = makeJob()
+  fs.mkdirSync(path.join(ctx.root, 'outside', 'sub'), { recursive: true })
+  fs.symlinkSync(path.join(ctx.root, 'outside', 'sub'), path.join(ctx.worktree, 'src', 'link'))
+  assert.equal(write(ctx, `${ctx.worktree}/src/link/../escape.ts`).rule, 'outside-worktree')
+  assert.equal(write(ctx, `${ctx.worktree}/src/link/x.ts`).rule, 'outside-worktree')
+})
+
+test('symlinks: a link that stays inside paths is allowed, a loop is denied', () => {
+  const ctx = makeJob()
+  fs.symlinkSync('feature.ts', path.join(ctx.worktree, 'src', 'alias.ts'))
+  assert.equal(write(ctx, 'src/alias.ts').decision, 'allow')
+  fs.symlinkSync('loop', path.join(ctx.worktree, 'src', 'loop'))
+  assert.equal(write(ctx, 'src/loop').rule, 'unresolved-target')
+})
+
+test('command rules: shell keywords and wrapper options with values', () => {
+  const denied = {
+    'if true; then git commit -m x; fi': 'git-state',
+    'for f in a b; do git push; done': 'git-state',
+    'while true; do claude; done': 'ai-cli',
+    '{ git push; }': 'git-state',
+    '! git push': 'git-state',
+    'env -u DEBUG claude --version': 'ai-cli',
+    'env -C /tmp -u X FOO=1 codex exec hi': 'ai-cli',
+    'env -S "claude --version"': 'ai-cli',
+    'sudo -u bob git push': 'git-state',
+    'xargs -I {} git commit -m {}': 'git-state',
+    'nice -n 5 git push': 'git-state',
+    'timeout -s KILL 60 git push': 'git-state',
+    'exec -a name git push': 'git-state',
+    'npx -p @scope/tool claude --version': 'ai-cli',
+    'npx -c "git push"': 'git-state',
+    'pnpm dlx --package=x claude': 'ai-cli',
+    'bunx -p x gemini': 'ai-cli',
+  }
+  for (const [line, rule] of Object.entries(denied)) assert.equal(command(line, IMPLEMENT).rule, rule, line)
+  for (const line of ['echo if then git', 'if [ -f x ]; then echo ok; fi', 'command -v git', 'env -u DEBUG node -v'])
+    assert.equal(command(line, IMPLEMENT).decision, 'allow', line)
+})
+
+test('command rules: package manager options per tool', () => {
+  for (const line of ['pnpm -w install', 'pnpm -w add lodash', 'npm --workspace x install', 'npm -w x i', 'yarn workspace web add lodash'])
+    assert.equal(command(line, IMPLEMENT).rule, 'dependencies', line)
+  for (const line of ['pnpm -w lint', 'npm -w web run build', 'yarn workspace web build'])
+    assert.equal(command(line, IMPLEMENT).decision, 'allow', line)
+})
+
+test('plan files match without regard to case', () => {
+  const ctx = makeJob({ paths: ['**'] })
+  for (const name of ['spec.md', 'map.md', 'Spec.MD', 'docs/feature-TICKET.md', 'ticket.md'])
+    assert.equal(write(ctx, name, { paths: ['**'] }).rule, 'plan-file', name)
+  assert.equal(write(ctx, 'docs/tickets.md', { paths: ['**'] }).decision, 'allow')
+})
+
+test('the inlined glob matcher agrees with jobs.mjs', () => {
+  for (const glob of ['src/**', '**/*.ts', 'apps/*/src/**/*.tsx', 'a?b.md', 'docs/x (1).md', '**'])
+    assert.equal(globToRegExp(glob).source, jobsGlob(glob).source, glob)
 })

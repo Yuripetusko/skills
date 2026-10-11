@@ -6,8 +6,25 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { globToRegExp } from '../jobs.mjs'
 import { isVerifier, jobDir, logLine, readState, readStdin } from './job.mjs'
+
+// A copy of globToRegExp in jobs.mjs, which wt-finish uses, so the hook never depends on that module
+// loading. hooks.test.mjs checks the two agree.
+export function globToRegExp(glob) {
+  let re = ''
+  for (let i = 0; i < glob.length; i++) {
+    if (glob.startsWith('**/', i)) {
+      re += '(?:.*/)?'
+      i += 2
+    } else if (glob.startsWith('**', i)) {
+      re += '.*'
+      i += 1
+    } else if (glob[i] === '*') re += '[^/]*'
+    else if (glob[i] === '?') re += '[^/]'
+    else re += glob[i].replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  }
+  return new RegExp(`^${re}$`)
+}
 
 export const WRITE_TOOLS = new Set([
   'write_to_file',
@@ -61,35 +78,70 @@ export function simpleCommands(line) {
 }
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
-const WRAPPERS = new Set(['sudo', 'env', 'command', 'builtin', 'exec', 'time', 'nohup', 'nice', 'xargs', 'npx', 'bunx', 'pnpx'])
-const skipOptions = words => {
+// Words that start a shell construct; the command follows them.
+const SHELL_KEYWORDS = new Set(['if', 'then', 'elif', 'else', 'fi', 'do', 'done', 'while', 'until', 'for', 'select', 'case', 'esac', '{', '}', '!'])
+// Programs that run the rest of their arguments, with the options that take a value.
+const WRAPPERS = {
+  sudo: ['-u', '--user', '-g', '--group', '-h', '--host', '-p', '--prompt', '-C', '--close-from', '-D', '--chdir', '-r', '--role', '-t', '--type', '-U', '--other-user', '-T', '--command-timeout'],
+  env: ['-u', '--unset', '-C', '--chdir', '-S', '--split-string'],
+  command: [],
+  builtin: [],
+  exec: ['-a'],
+  time: ['-f', '--format', '-o', '--output'],
+  nohup: [],
+  nice: ['-n', '--adjustment'],
+  xargs: ['-I', '-i', '-L', '-l', '-n', '--max-args', '-P', '--max-procs', '-s', '--max-chars', '-E', '-e', '-d', '--delimiter', '-a', '--arg-file'],
+  npx: ['-p', '--package', '-c', '--call'],
+  bunx: ['-p', '--package'],
+  pnpx: ['-p', '--package', '-c'],
+  timeout: ['-s', '--signal', '-k', '--kill-after'],
+}
+// `pnpm exec`, `pnpm dlx`, `npm exec`, `yarn dlx`, `bun x` also run a program.
+const RUNNER_SUBCOMMANDS = { pnpm: ['exec', 'dlx'], npm: ['exec', 'x'], yarn: ['exec', 'dlx'], bun: ['x'] }
+const RUNNER_VALUED = ['-p', '--package', '-c', '--call', '--shell-mode']
+// Skips leading options, and the value of each option in `valued`. Returns [the rest, {option: value}].
+const skipOptions = (words, valued = []) => {
+  const seen = {}
   let i = 0
-  while (words[i]?.startsWith('-')) i++
-  return words.slice(i)
+  while (i < words.length && words[i].startsWith('-') && words[i] !== '-') {
+    if (words[i] === '--') return [words.slice(i + 1), seen]
+    if (valued.includes(words[i])) seen[words[i]] = words[++i]
+    i++
+  }
+  return [words.slice(i), seen]
 }
 const program = word => path.basename(word ?? '').replace(/(.)@[^/]*$/, '$1')
 
-// Strips what runs another program (env assignments, sudo, env, timeout, npx, pnpm exec, ...) and
-// expands `sh -c` and `eval`, so the rules see the program that runs.
+// Strips what runs another program (shell keywords, env assignments, sudo, env, timeout, npx,
+// pnpm exec, ...) and expands `sh -c`, `eval`, `env -S` and `npx -c`, so the rules see the program
+// that runs.
 export function commandsIn(line, depth = 0) {
   if (depth > 3) return []
   return simpleCommands(line).flatMap(raw => {
     let w = raw
-    for (let guard = 0; guard < 10 && w.length; guard++) {
+    const nested = []
+    for (let guard = 0; guard < 20 && w.length; guard++) {
       const head = program(w[0])
-      if (ASSIGNMENT.test(w[0])) w = w.slice(1)
-      else if (WRAPPERS.has(head)) w = skipOptions(w.slice(1))
-      else if (head === 'timeout') w = skipOptions(w.slice(1)).slice(1)
-      else if (['pnpm', 'npm', 'yarn', 'bun'].includes(head) && ['exec', 'dlx', 'x'].includes(w[1])) w = skipOptions(w.slice(2))
-      else break
+      if (SHELL_KEYWORDS.has(w[0]) || ASSIGNMENT.test(w[0])) w = w.slice(1)
+      else if (WRAPPERS[head]) {
+        const [rest, seen] = skipOptions(w.slice(1), WRAPPERS[head])
+        // A command string passed as an option value runs too.
+        for (const opt of ['-S', '--split-string', '-c', '--call']) if (seen[opt] != null) nested.push(seen[opt])
+        w = head === 'timeout' ? rest.slice(1) : rest
+      } else if (RUNNER_SUBCOMMANDS[head]?.includes(w[1])) {
+        const [rest, seen] = skipOptions(w.slice(2), RUNNER_VALUED)
+        for (const opt of ['-c', '--call', '--shell-mode']) if (seen[opt] != null) nested.push(seen[opt])
+        w = rest
+      } else break
     }
+    const inner = nested.flatMap(n => commandsIn(n, depth + 1))
     const head = program(w[0])
     if (['sh', 'bash', 'zsh', 'dash'].includes(head)) {
       const flag = w.findIndex(x => /^-[a-z]*c[a-z]*$/.test(x))
-      if (flag > 0 && w[flag + 1] != null) return commandsIn(w[flag + 1], depth + 1)
+      if (flag > 0 && w[flag + 1] != null) return [...inner, ...commandsIn(w[flag + 1], depth + 1)]
     }
-    if (head === 'eval') return commandsIn(w.slice(1).join(' '), depth + 1)
-    return w.length ? [[head, ...w.slice(1)]] : []
+    if (head === 'eval') return [...inner, ...commandsIn(w.slice(1).join(' '), depth + 1)]
+    return w.length ? [...inner, [head, ...w.slice(1)]] : inner
   })
 }
 
@@ -107,8 +159,13 @@ const GIT_STATE = new Set(['commit', 'push', 'pull', 'reset', 'rebase', 'checkou
 const GIT_VALUED = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace'])
 const AI_CLIS = new Set(['claude', 'claude-code', 'codex', 'gemini', 'gemini-cli', 'agy', 'coderabbit', 'cr'])
 const GH_WRITES = { pr: ['create', 'merge', 'review', 'comment', 'edit', 'close'], issue: ['create', 'comment', 'edit'] }
-const PACKAGE_MANAGERS = new Set(['pnpm', 'npm', 'yarn', 'bun'])
-const PM_VALUED = new Set(['--filter', '-F', '-C', '--dir', '--prefix', '-w', '--workspace', '--cwd'])
+// Per package manager, the global options that take a value. pnpm's -w is a flag; npm's takes a name.
+const PM_VALUED = {
+  pnpm: new Set(['--filter', '-F', '-C', '--dir', '--reporter', '--loglevel', '--store-dir', '--lockfile-dir', '--modules-dir']),
+  npm: new Set(['-w', '--workspace', '--prefix', '-C', '--loglevel', '--registry', '--cache', '--userconfig']),
+  yarn: new Set(['--cwd', '--modules-folder', '--registry', '--cache-folder']),
+  bun: new Set(['--cwd', '-c', '--config']),
+}
 const DEP_CHANGES = new Set(['add', 'remove', 'rm', 'uninstall', 'un', 'install', 'i', 'ci', 'update', 'up', 'upgrade'])
 
 function gitStateChange([head, ...rest]) {
@@ -129,9 +186,12 @@ function ghWrite([head, ...rest]) {
   return method ? /^(POST|PATCH|PUT|DELETE)$/i.test(method) : fields
 }
 function dependencyChange([head, ...rest]) {
-  if (!PACKAGE_MANAGERS.has(head)) return false
+  if (!PM_VALUED[head]) return false
   if (head === 'yarn' && rest.length === 0) return true
-  return DEP_CHANGES.has(positionals(rest, PM_VALUED)[0])
+  const [sub, ...args] = positionals(rest, PM_VALUED[head])
+  // yarn workspace <name> add x
+  if (head === 'yarn' && sub === 'workspace') return DEP_CHANGES.has(args[1])
+  return DEP_CHANGES.has(sub)
 }
 
 const ALL = ['task', 'implement']
@@ -142,18 +202,46 @@ export const COMMAND_RULES = [
   { id: 'dependencies', modes: ['implement'], test: dependencyChange, why: 'adding, removing, updating or installing dependencies is blocked' },
 ]
 
-const PLAN_FILE = /(^|-)ticket\.md$|^(MAP|SPEC)\.md$/
-// The deepest existing ancestor goes through realpath, so /tmp and /private/tmp compare equal.
-function realish(file) {
-  const rest = []
-  let cur = file
-  while (!fs.existsSync(cur)) {
-    const parent = path.dirname(cur)
-    if (parent === cur) return file
-    rest.unshift(path.basename(cur))
-    cur = parent
+// Case-insensitive: macOS file systems treat spec.md and SPEC.md as one file.
+const PLAN_FILE = /(^|-)ticket\.md$|^(map|spec)\.md$/i
+
+// Resolves a write target one component at a time, following every symlink (dangling ones too)
+// before applying the `..` that comes after it, as the kernel does. Returns null when it can't.
+export function resolveTarget(file) {
+  const queue = file.split('/')
+  let cur = '/'
+  let hops = 0
+  while (queue.length) {
+    const part = queue.shift()
+    if (part === '' || part === '.') continue
+    if (part === '..') {
+      cur = path.dirname(cur)
+      continue
+    }
+    const next = path.join(cur, part)
+    let stat
+    try {
+      stat = fs.lstatSync(next)
+    } catch (error) {
+      if (error.code !== 'ENOENT') return null
+      cur = next // missing from here on: nothing below it can be a link
+      continue
+    }
+    if (!stat.isSymbolicLink()) {
+      cur = next
+      continue
+    }
+    if (++hops > 40) return null
+    let link
+    try {
+      link = fs.readlinkSync(next)
+    } catch {
+      return null
+    }
+    queue.unshift(...link.split('/'))
+    if (path.isAbsolute(link)) cur = '/'
   }
-  return path.join(fs.realpathSync(cur), ...rest)
+  return cur
 }
 export function inPaths(rel, paths, worktree) {
   return paths.some(p => {
@@ -183,6 +271,7 @@ export const WRITE_RULES = [
 ]
 
 const NO_TARGET = { id: 'no-target', why: 'the write names no target path to check' }
+const UNRESOLVED = { id: 'unresolved-target', why: 'the target path could not be resolved (a symlink loop or an unreadable directory)' }
 const blocked = (rule, target) => ({
   decision: 'deny',
   rule: rule.id,
@@ -209,7 +298,11 @@ export function decide(call, state) {
       if (!rules.length) return { decision: 'allow', target: '' }
       return blocked(rules.find(r => r.id === 'read-only') ?? NO_TARGET, '')
     }
-    const abs = realish(path.resolve(state.worktree, String(raw).replace(/^file:\/\//, '')))
+    if (!rules.length) return { decision: 'allow', target: String(raw) }
+    // Joined as text, not with path.resolve, which would apply `..` before following symlinks.
+    const given = String(raw).replace(/^file:\/\//, '')
+    const abs = resolveTarget(path.isAbsolute(given) ? given : `${state.worktree}/${given}`)
+    if (abs == null) return blocked(rules.find(r => r.id === 'read-only') ?? UNRESOLVED, given)
     const rel = path.relative(state.worktree, abs)
     const file = { abs, rel, outside: rel === '' || rel.startsWith('..') || path.isAbsolute(rel) }
     const rule = rules.find(r => r.test(file, state))
