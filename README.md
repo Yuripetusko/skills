@@ -55,9 +55,10 @@ node ~/.claude/delegate-jobs/jobs.mjs tail [<job>] -f
 node ~/.claude/delegate-jobs/jobs.mjs cancel <job>
 ```
 
-For the orchestrating session itself, start the Monitor tool on `delegate-jobs tail --next -f` right
-after dispatching. Each finished step
-arrives as a notification, and the stream ends with the job's outcome.
+For the orchestrating session itself, start the Monitor tool on
+`delegate-jobs tail --next -f --every 2m` right after dispatching. It sends one summary line every two
+minutes and then the job's outcome, which keeps the orchestrator's context small. Drop `--every` to
+get every step.
 
 `jobs.mjs` is shared by both plugins, with an identical copy in each; check them with
 `cmp plugins/agy-delegate/skills/using-agy-from-claude/scripts/jobs.mjs plugins/codex-delegate/skills/using-codex-from-claude/scripts/jobs.mjs`.

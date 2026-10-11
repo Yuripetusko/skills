@@ -23,7 +23,8 @@ const USAGE = `Usage: node jobs.mjs <command>
   new <tool> [--label <text>]          create a job dir under ${ROOT}, print its path
   exec <job> [--write] -- <cmd...>     run <cmd> as the job's runner; --write takes this checkout's write lock
   jobs [--all] [--json]                list running and recent jobs (all checkouts)
-  tail [<job>|--next] [-n <lines>] [-f]  recent progress of a job (default: newest); -f follows it to the end
+  tail [<job>|--next] [-n <lines>] [-f] [--every <dur>]  recent progress (default: newest job);
+                                       -f follows it to the end, --every condenses to one line per interval
   cancel <job>                         stop a running job
   wt-setup [--base <ref>] [--install] [--allow-main]
   wt-finish --paths '<path|glob> ...' | --path <p> [--path <p>…] [--message <commit message>]
@@ -281,28 +282,44 @@ function lastLine(job) {
 
 // -f keeps following until the job ends and then prints its outcome, so `tail -f` works as an event
 // stream for Claude Code's Monitor tool. --next waits for the next job to start, for a caller that
-// has just dispatched a relay and does not know its job yet.
+// has just dispatched a relay and does not know its job yet. --every <dur> condenses the stream to
+// one summary line per interval, so a watching agent spends little context on it.
 function cmdTail(args) {
-  const n = args.includes('-n') ? Number(args[args.indexOf('-n') + 1]) || 20 : 20
-  const ref = args.find((a, i) => !a.startsWith('-') && args[i - 1] !== '-n')
-  if (!args.includes('--next')) return follow(resolveJob(ref), n, args.includes('-f'))
+  const opt = name => (args.includes(name) ? args[args.indexOf(name) + 1] : null)
+  const n = Number(opt('-n')) || 20
+  const every = opt('--every')
+  const everyMs = every ? (Number(/^(\d+)([sm]?)$/.exec(every)?.[1]) || 0) * (every.endsWith('m') ? 60e3 : 1e3) : 0
+  if (every && !everyMs) fail(`bad --every "${every}"; use e.g. 30s or 2m`)
+  const ref = args.find((a, i) => !a.startsWith('-') && !['-n', '--every'].includes(args[i - 1]))
+  const keep = args.includes('-f') || args.includes('--next')
+  if (!args.includes('--next')) return follow(resolveJob(ref), n, keep, everyMs)
   const since = Date.now() - 1000
   const timer = setInterval(() => {
     const job = allJobs().find(j => Date.parse(j.createdAt) >= since)
     if (!job) return
     clearInterval(timer)
-    follow(job, n, true)
+    follow(job, n, true, everyMs)
   }, 1000)
 }
-function follow(job, n, keep) {
+function follow(job, n, keep, everyMs) {
+  const clip = l => (l.length > 140 ? `${l.slice(0, 137)}...` : l)
   console.log(`${job.id} · ${job.status} · ${home(job.cwd)} · ${home(job.dir)}`)
   if (!keep) return progressLines(job, { partial: true }).slice(-n).forEach(l => console.log(l))
   let shown = progressLines(job)
-  shown.slice(-n).forEach(l => console.log(l))
+  if (!everyMs) shown.slice(-n).forEach(l => console.log(l))
+  let pending = 0
+  let latest = null
+  let lastEmit = Date.now()
   const timer = setInterval(() => {
     const now = progressLines(job)
-    now.slice(shown.length).forEach(l => console.log(l))
+    const fresh = now.slice(shown.length)
     shown = now
+    if (!everyMs) fresh.forEach(l => console.log(l))
+    else if (fresh.length) [pending, latest] = [pending + fresh.length, fresh.at(-1)]
+    if (everyMs && pending && Date.now() - lastEmit >= everyMs) {
+      console.log(`${job.id} · +${pending} step(s) · ${clip(latest)}`)
+      ;[pending, lastEmit] = [0, Date.now()]
+    }
     const meta = readMeta(job.dir)
     if (['created', 'running'].includes(meta.status)) return
     clearInterval(timer)

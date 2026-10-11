@@ -1,6 +1,6 @@
 ---
 name: codex-advisor
-description: Independent second opinion from OpenAI Codex (GPT-6). Use proactively when an unbiased outside perspective or a different approach to the problem would help - reviewing a diff, pressure-testing a plan or design decision, challenging assumptions, or a bug that resisted a first attempt. Read-only. Brief it like a colleague with no context; it returns Codex's answer verbatim. Progress: run Monitor on `delegate-jobs tail --next -f` right after dispatching.
+description: Independent second opinion from OpenAI Codex (GPT-6). Use proactively when an unbiased outside perspective or a different approach to the problem would help - reviewing a diff, pressure-testing a plan or design decision, challenging assumptions, or a bug that resisted a first attempt. Read-only. Brief it like a colleague with no context; it returns Codex's answer verbatim. Progress: run Monitor on `delegate-jobs tail --next -f --every 2m` right after dispatching.
 tools: Bash, Read
 model: sonnet
 effort: low

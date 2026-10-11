@@ -117,11 +117,18 @@ spaces, and an entry that contains spaces goes in double quotes.
   `<dir>/err.log`, records the job in the shared registry, takes the checkout's write lock for
   `--write`, and prints Codex's progress lines to the call's own output. That output is what the
   user sees in the app's background-task panel.
-- Then end your turn with one line: the mode, `<dir>`, and `node "$JOBS" tail <job>` for watching it.
-  Do not poll, sleep, tail, or call `status`: you are re-invoked when the command exits.
+- Then end your turn with one plain-text line: the mode, `<dir>`, and `node "$JOBS" tail <job>`.
+  You are pausing, not finishing: that line is not your report, and plain text at the end of a run
+  is not delivered to your caller anyway. Do not call `SubagentHandback` now: it ends your run and
+  can be used only once. You are re-invoked when the command exits. Do not poll, sleep, tail, or
+  call `status` in the meantime.
 - Never pass `--background`; the runtime rejects it.
 
 ## 6. When the command exits
+
+Your reply below is your one final report. Do everything else first, including `wt-finish` in
+implementer mode, then deliver the whole reply in a single `SubagentHandback` call when you have
+that tool; without it, end your run with the reply as plain text.
 
 The first line of `<dir>/err.log` reads `[codex] Job <id> (invoker …), log: <path>`.
 
@@ -182,8 +189,9 @@ node ~/.claude/delegate-jobs/jobs.mjs cancel <job>
 Inside Claude Code the plugin puts `delegate-jobs` on the Bash `PATH`, the same script without the
 `node` prefix (`delegate-jobs jobs`, `delegate-jobs tail <job>`). An orchestrating Claude session can
 have progress pushed to it: right after dispatching a relay, start the Monitor tool on
-`delegate-jobs tail --next -f`. Each finished step arrives as a notification, and the stream ends
-with the job's outcome. Use `tail <job> -f` when the job is already known.
+`delegate-jobs tail --next -f --every 2m`. It sends one summary line per two minutes (steps since the
+last line, and the latest one) and then the job's outcome. Drop `--every` to get every step, which
+costs the watching agent more context. Use `tail <job> -f` when the job is already known.
 
 Job directories live in `~/.claude/delegate-jobs/` (override with `DELEGATE_JOBS_DIR`) and are pruned
 after 7 days. `scripts/jobs.mjs` is shared with the `agy-delegate` plugin, which has an identical
