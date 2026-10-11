@@ -3,6 +3,8 @@
 // stdout gets agy's final answer, minus leading waiting-status lines; stderr and <job>/report.md get the runner's report: exit
 // reason, files agy wrote (from its tool calls), commands it ran, calls the job's hooks blocked, and git
 // status after the run. agy runs as the per-job agent in $JOB/agy/, whose hooks enforce the job rules.
+// In implement mode the lint and type-check gate runs a baseline before launch, and the Stop hook
+// (hooks/stop.mjs) sends agy back while its change adds findings; report.md then opens with "Gates".
 // Behaviour this relies on was measured on agy 1.3.3; see SKILL.md, "Measured on agy 1.3.3".
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -11,7 +13,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CANARY, readHookLog, STATE, stateHash } from './hooks/job.mjs'
+import { CANARY, readHookLog, readState, ROUND_CAP, runGate, STOP_TIMEOUT_S, stateHash, writeState } from './hooks/job.mjs'
 import { updateMeta } from './jobs.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -19,7 +21,7 @@ const DEFAULT_MODEL = 'gemini-3.8-flash-high'
 const DEFAULT_TIMEOUT = '30m'
 const MAX_TIMEOUT_S = 110 * 60 // the relay's background Bash call dies at 2 h
 const GUARD_S = 120 // wall clock past --print-timeout before the runner kills agy itself
-const EXIT = { ok: 0, usage: 1, failed: 2, empty: 3, quota: 10, auth: 11, timeout: 12, missing: 13, model: 14, denied: 15, setup: 18 }
+const EXIT = { ok: 0, usage: 1, failed: 2, empty: 3, quota: 10, auth: 11, timeout: 12, missing: 13, model: 14, denied: 15, gate: 17, setup: 18 }
 // The job's main agent. AGY_DELEGATE_AGENT overrides the --agent name only, for testing the setup checks.
 const AGENT = 'delegate-implementer'
 // Names from agy 1.3.3's init event. Left out: subagent, browser, MCP, image and permission tools.
@@ -87,7 +89,7 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--read-only') opts.readOnly = true
-    else if (['--job-dir', '--mode', '--model', '--timeout', '--resume'].includes(a)) opts[a.slice(2)] = argv[++i]
+    else if (['--job-dir', '--mode', '--model', '--timeout', '--resume', '--gate-config'].includes(a)) opts[a.slice(2)] = argv[++i]
     else if (a.startsWith('-')) die(EXIT.usage, `unknown option ${a}`)
     else opts._.push(a)
   }
@@ -128,8 +130,9 @@ function briefPaths(brief) {
 const shellQuote = s => `'${String(s).replace(/'/g, "'\\''")}'`
 
 // $JOB/agy/ is passed with --add-dir and holds config only: agy can read it, and write it through shell
-// commands. The hooks keep their state, log and canary directly under $JOB/.
-function writeJobConfig({ dir, cwd, mode, readOnly, model, paths }) {
+// commands. The hooks keep their state, log and canary directly under $JOB/. `gate` is the recorded
+// baseline, or null when the job has no gate; only then is the Stop hook left out.
+function writeJobConfig({ dir, cwd, mode, readOnly, model, paths, gate }) {
   // The hooks resolve paths: against the checkout's top level, as wt-finish does.
   const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' })
   const worktree = fs.realpathSync(top.status === 0 ? top.stdout.trim() : cwd)
@@ -144,6 +147,7 @@ function writeJobConfig({ dir, cwd, mode, readOnly, model, paths }) {
     'agy-delegate-job': {
       PreToolUse: [{ matcher: '', hooks: [hook('pre-tool', 30)] }],
       PreInvocation: [hook('pre-invocation', 30)],
+      ...(gate ? { Stop: [hook('stop', STOP_TIMEOUT_S)] } : {}),
     },
   }
   fs.writeFileSync(path.join(agyDir, '.agents', 'hooks.json'), `${JSON.stringify(hooks, null, 2)}\n`)
@@ -171,12 +175,31 @@ function writeJobConfig({ dir, cwd, mode, readOnly, model, paths }) {
     cwd,
     scope,
     blocked: `${blocked.slice(0, -1).join(', ')} and ${blocked.at(-1)}`,
+    gate: gate
+      ? `When you stop, this job runs lint and type-check on the packages in scope and compares the findings with a baseline taken before you started. If your change added findings, you get them back and keep working. After ${ROUND_CAP} rounds the job fails with the findings listed. Fix them in the code. Disable comments and casts that hide a finding count as findings too. Do not run repo-wide lint or type-check yourself, because the stop check does that. Scoped checks on the files you touched are fine.`
+      : '',
   }
   const template = read(path.join(SKILL_DIR, 'prompts', 'agents', `${AGENT}.md`))
-  const agent = template.replace(/\{\{(\w+)\}\}/g, (m, key) => vars[key] ?? m).replace(/ +\n/g, '\n')
+  const agent = template
+    .replace(/\{\{(\w+)\}\}/g, (m, key) => vars[key] ?? m)
+    .replace(/ +\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
   fs.writeFileSync(path.join(agyDir, '.agents', 'agents', `${AGENT}.md`), agent)
   const state = { job: dir, worktree, mode, readOnly: Boolean(readOnly), paths, agent: AGENT, model, createdAt: new Date().toISOString() }
-  fs.writeFileSync(path.join(dir, STATE), `${JSON.stringify(state, null, 2)}\n`)
+  // stop.mjs adds its rounds here. The scope is the baseline's: the units its commands cover.
+  if (gate) {
+    const scope = gate.baseline?.scope
+    state.gate = {
+      config: gate.baseline?.config ?? null,
+      scope: scope ? { whole: scope.whole, reason: scope.reason, seeds: scope.seeds, units: scope.units } : null,
+      cap: ROUND_CAP,
+      round: 0,
+      continues: 0,
+      verdict: null,
+      history: [],
+    }
+  }
+  writeState(dir, state)
   return { agyDir, stateSha: stateHash(state) }
 }
 
@@ -185,7 +208,7 @@ const SLASH_TIMEOUT_S = 60
 // `/hooks` and `/agents` answer from config without calling a model. Our hooks must be listed from our
 // hooks.json, and the --agent name must be listed: agy runs its default agent for an unknown one.
 // Returns null when both pass, else what failed.
-function checkJobConfig(agy, cwd, agyDir, agent) {
+function checkJobConfig(agy, cwd, agyDir, agent, events) {
   // Only a clean exit counts: a call that timed out or crashed may still have printed JSON.
   const slash = command => {
     const r = spawnSync(agy, ['-p', command, '--output-format', 'json', '--add-dir', agyDir, '--agent', agent], {
@@ -206,12 +229,12 @@ function checkJobConfig(agy, cwd, agyDir, agent) {
     }
   }
   try {
-    return checkListings(slash, agyDir, agent)
+    return checkListings(slash, agyDir, agent, events)
   } catch (error) {
     return error.message
   }
 }
-function checkListings(slash, agyDir, agent) {
+function checkListings(slash, agyDir, agent, required) {
   const real = file => {
     try {
       return fs.realpathSync(file)
@@ -222,7 +245,7 @@ function checkListings(slash, agyDir, agent) {
   const ours = real(path.join(agyDir, '.agents', 'hooks.json'))
   const listed = (slash('/hooks')?.hooks ?? []).filter(h => h.enabled !== false && real(h.source ?? '') === ours)
   const events = new Set(listed.flatMap(h => (h.actions ?? []).map(a => a.event)))
-  const missing = ['PreToolUse', 'PreInvocation'].filter(e => !events.has(e))
+  const missing = required.filter(e => !events.has(e))
   if (missing.length) return `\`agy -p /hooks\` does not list this job's ${missing.join(' and ')} hook from ${ours}`
   const agents = slash('/agents')?.agents ?? []
   if (!agents.includes(agent)) return `\`agy -p /agents\` does not list agent "${agent}" (it lists: ${agents.join(', ') || 'none'})`
@@ -300,7 +323,80 @@ async function reap(tracked, agyPid) {
   return first.map(t => t.command)
 }
 
-function report({ cwd, dir, model, exit, why, result, events, before, readOnly, stopped, denies, loaded }) {
+const tryJson = file => {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch {
+    return null
+  }
+}
+const indent = text => text.split('\n').map(l => `  ${l}`)
+
+// The lint and type-check baseline, before agy starts: `jobs.mjs gate baseline` in the checkout, in
+// its own process group so a cancel also stops its commands. Returns {configured: false, line} or
+// {configured: true, line, baseline}, or {error, output} when it could not run.
+async function gateBaseline(dir, cwd, configPath) {
+  log('gate baseline: running lint and type-check before agy starts')
+  const args = ['baseline', '--job', dir, ...(configPath ? ['--gate-config', path.resolve(configPath)] : [])]
+  const { stop, done } = runGate(args, { cwd })
+  const cancel = sig => {
+    stop()
+    process.exit(128 + SIGNALS[sig])
+  }
+  for (const sig of Object.keys(SIGNALS)) process.on(sig, cancel)
+  const r = await done
+  for (const sig of Object.keys(SIGNALS)) process.off(sig, cancel)
+  const out = r.stdout.trim()
+  const line = out.split('\n')[0]
+  log(`gate baseline: exit ${r.status ?? r.signal} after ${Math.round(r.durationMs / 1000)}s: ${line || 'no output'}`)
+  if (r.status === 3) return { configured: false, line: line || 'GATE: not configured' }
+  if (r.status === 0) return { configured: true, line, baseline: tryJson(path.join(dir, 'gate', 'baseline.json')) }
+  const stderr = r.stderr.trim().split('\n').slice(-15).join('\n')
+  const output = [out, stderr].filter(Boolean).join('\n') || r.error || 'no output'
+  return { error: `gate baseline exited ${r.status ?? r.signal}`, output }
+}
+
+// The gate verdict of this execution, from the rounds stop.mjs recorded in state.json. Only a round
+// with this execution's run id counts, and anything but OK fails the job.
+function gateOutcome(dir, gate, runId) {
+  if (!gate.configured) return { verdict: 'not configured', head: `${gate.line} (no gate config for this checkout)`, lines: [] }
+  let g = null
+  try {
+    g = readState(dir).gate
+  } catch {}
+  if (g?.run !== runId) g = null
+  const history = g?.history ?? []
+  const last = history.at(-1)
+  const verdict = ['OK', 'FAILED'].includes(g?.verdict) ? g.verdict : 'error'
+  const counts = h =>
+    h?.added == null ? [] : [`${h.added} added, ${h.removed ?? 0} removed${h.outside ? `, ${h.outside} file(s) outside the baseline scope` : ''}`]
+  const rounds = `${g?.round ?? 0} round(s), ${g?.continues ?? 0} sent back`
+  const reason = g?.reason ?? 'no gate check ran in this execution: agy ended without a normal stop'
+  const head = verdict === 'error' ? `GATE ERROR: ${reason} · ${rounds}` : `GATE ${verdict}: ${[...counts(last), rounds].join(' · ')}`
+  const lines = [
+    `- baseline: ${gate.line}`,
+    ...history.map(h => {
+      const parts = [h.verdict, ...counts(h), `${Math.round((h.durationMs ?? 0) / 1000)}s`, h.action === 'continue' ? 'sent back to agy' : 'stop allowed']
+      return `- round ${h.round}: ${parts.join(', ')}`
+    }),
+    ...(verdict !== 'OK' && last?.lines?.length ? [verdict === 'FAILED' ? '- still failing:' : '- gate output:', ...indent(last.lines.join('\n'))] : []),
+    `- details: ${path.join(dir, 'gate')}/`,
+  ]
+  const why =
+    verdict === 'FAILED'
+      ? `gate FAILED after ${g?.continues ?? 0} round(s) sent back: ${last?.added ?? '?'} finding(s) added${last?.outside ? `, ${last.outside} file(s) outside the baseline scope` : ''}`
+      : `gate error: ${reason}`
+  const meta = { verdict, ...(last ? { added: last.added, removed: last.removed, round: last.round } : {}), rounds: g?.round ?? 0 }
+  return { verdict, head, lines, why, meta }
+}
+
+// meta.gate may hold fields `gate check --job` wrote; the runner owns the verdict and the rounds.
+function setMetaGate(dir, patch, extra = {}) {
+  const current = tryJson(path.join(dir, 'meta.json'))?.gate ?? {}
+  updateMeta(dir, { ...extra, gate: { ...current, ...patch } })
+}
+
+function report({ cwd, dir, model, exit, why, result, events, before, readOnly, stopped, denies, loaded, gates }) {
   // Count a tool call when it starts: a backgrounded command never reaches DONE.
   const byStep = new Map()
   for (const s of events.map(e => e.step_update)) if (s?.step_type === 'tool') byStep.set(s.step_index, s)
@@ -318,6 +414,7 @@ function report({ cwd, dir, model, exit, why, result, events, before, readOnly, 
   const changed = after ? [...after].filter(([f, code]) => before?.get(f) !== code) : []
   const preDirty = after ? [...after].filter(([f, code]) => before?.get(f) === code).length : 0
   const lines = [
+    ...(gates ? ['## Gates', `- ${gates.head}`, ...gates.lines, ''] : []),
     '## agy runner report',
     `- exit ${exit} (${LABEL[exit] ?? 'signal'}): ${why}`,
     `- model ${model} · ${Math.round(result?.duration_seconds ?? 0)}s · conversation ${result?.conversation_id || '-'}`,
@@ -349,7 +446,8 @@ function report({ cwd, dir, model, exit, why, result, events, before, readOnly, 
   process.stderr.write(`${lines.join('\n')}\n`)
 }
 
-function run(opts) {
+async function run(opts) {
+  const started = Date.now()
   const dir = path.resolve(opts['job-dir'] ?? die(EXIT.usage, 'run needs --job-dir'))
   const brief = read(path.join(dir, 'brief.md')).trim() || die(EXIT.usage, `${dir}/brief.md is missing or empty`)
   const mode = opts.mode ?? 'task'
@@ -361,19 +459,57 @@ function run(opts) {
   preflight(agy, model)
   const realCwd = fs.realpathSync(cwd)
   const agent = process.env.AGY_DELEGATE_AGENT || AGENT
-  const setupFailed = msg => {
-    updateMeta(dir, { verdict: msg })
+  // Implement jobs get the lint and type-check gate. `gate` stays null in task mode.
+  let gate = null
+  const setupFailed = (msg, gates = null) => {
+    if (gates) {
+      const lines = ['## Gates', `- ${gates.head}`, ...gates.lines, '', '## agy runner report', `- exit ${EXIT.setup} (setup): ${msg}`, `- job dir: ${dir}`]
+      fs.writeFileSync(path.join(dir, 'report.md'), `${lines.join('\n')}\n`)
+      process.stderr.write(`${lines.join('\n')}\n`)
+    }
+    if (gate?.configured || gates) setMetaGate(dir, { verdict: 'error', rounds: 0 }, { verdict: msg })
+    else updateMeta(dir, { verdict: msg })
     die(EXIT.setup, msg)
   }
+  if (mode === 'implement' && !opts.readOnly) {
+    gate = await gateBaseline(dir, cwd, opts['gate-config'])
+    if (gate.error) {
+      const output = indent(gate.output)
+      setupFailed(`${gate.error}, so agy did not start`, { head: 'GATE ERROR: the baseline could not run', lines: ['- gate output:', ...output] })
+    }
+    if (!gate.configured) setMetaGate(dir, { verdict: 'not configured' })
+  } else if (opts['gate-config']) log('--gate-config ignored: only implement jobs have a gate')
   let agyDir
   let stateSha
   try {
-    ;({ agyDir, stateSha } = writeJobConfig({ dir, cwd: realCwd, mode, readOnly: opts.readOnly, model, paths: briefPaths(brief) }))
+    ;({ agyDir, stateSha } = writeJobConfig({
+      dir,
+      cwd: realCwd,
+      mode,
+      readOnly: opts.readOnly,
+      model,
+      paths: briefPaths(brief),
+      gate: gate?.configured ? gate : null,
+    }))
   } catch (error) {
     setupFailed(`could not write the job config: ${error.message}`)
   }
-  const problem = checkJobConfig(agy, cwd, agyDir, agent)
+  const problem = checkJobConfig(agy, cwd, agyDir, agent, ['PreToolUse', 'PreInvocation', ...(gate?.configured ? ['Stop'] : [])])
   if (problem) setupFailed(`job rules did not load: ${problem}`)
+
+  // agy's turn limit. With a gate, it also covers ROUND_CAP + 1 Stop hook runs, in case hook time
+  // counts against --print-timeout, and the guard allows for them once more in case it doesn't. Both
+  // stay inside MAX_TIMEOUT_S from the runner's start, so the relay's 2 h Bash call outlives the job.
+  let printS = timeoutS
+  let guardS = timeoutS + GUARD_S
+  if (gate?.configured) {
+    const reserve = (ROUND_CAP + 1) * STOP_TIMEOUT_S
+    const budget = Math.max(60, MAX_TIMEOUT_S - Math.round((Date.now() - started) / 1000))
+    printS = Math.min(timeoutS + reserve, budget)
+    guardS = Math.min(printS + reserve, budget) + GUARD_S
+    if (printS < timeoutS + reserve)
+      log(`print-timeout capped at ${printS}s: ${timeoutS}s of work plus ${reserve}s for gate rounds would end past ${MAX_TIMEOUT_S / 60}m`)
+  }
 
   const prompt = [
     read(path.join(SKILL_DIR, 'prompts', 'preamble.md')).trim(),
@@ -396,7 +532,7 @@ function run(opts) {
   fs.rmSync(canary, { force: true })
 
   const args = ['-p=', '--input-format', 'stream-json', '--output-format', 'stream-json', '--model', model]
-  args.push('--dangerously-skip-permissions', '--print-timeout', `${timeoutS}s`, '--add-dir', agyDir, '--agent', agent)
+  args.push('--dangerously-skip-permissions', '--print-timeout', `${printS}s`, '--add-dir', agyDir, '--agent', agent)
   if (opts.resume) args.push('--conversation', opts.resume)
   const child = spawn(agy, args, {
     cwd,
@@ -406,11 +542,12 @@ function run(opts) {
       AGY_DELEGATE_JOB: dir,
       AGY_DELEGATE_RUN: runId,
       AGY_DELEGATE_STATE_SHA: stateSha,
+      AGY_DELEGATE_GATE: gate?.configured ? '1' : '',
       AGY_DELEGATE_ROLE: '',
     },
     stdio: [fs.openSync(input, 'r'), fs.openSync(eventsFile, 'a'), fs.openSync(agyErr, 'a')],
   })
-  log(`${mode} job started: ${model}, print-timeout ${timeoutS}s, pid ${child.pid}, cwd ${cwd}`)
+  log(`${mode} job started: ${model}, print-timeout ${printS}s, pid ${child.pid}, cwd ${cwd}`)
 
   let stopReason = null
   const stop = why => {
@@ -424,7 +561,7 @@ function run(opts) {
       } catch {}
     }, 10_000).unref()
   }
-  const guard = setTimeout(() => stop('guard'), (timeoutS + GUARD_S) * 1000)
+  const guard = setTimeout(() => stop('guard'), guardS * 1000)
   for (const sig of Object.keys(SIGNALS)) process.on(sig, () => stop(sig))
   // agy must bind to this checkout. It did on 1.3.3; fail fast if a later version picks another root.
   const checkBinding = () => {
@@ -475,24 +612,26 @@ function run(opts) {
       .filter(s => s?.step_type === 'agent_response')
       .map(s => s.text_delta ?? '')
       .join('')
+    const gates = gate ? gateOutcome(dir, gate, runId) : null
     let exit
     let why
     if (SIGNALS[stopReason]) [exit, why] = [128 + SIGNALS[stopReason], `runner got ${stopReason}; agy was stopped`]
     else if (stopReason?.startsWith('workspace')) [exit, why] = [EXIT.failed, `agy bound to ${stopReason.slice(10)}, not ${cwd}`]
     else if (stopReason === 'setup')
       [exit, why] = [EXIT.setup, `job rules did not load: agy finished a step with no canary ($JOB/${CANARY}) and was stopped`]
-    else if (stopReason === 'guard') [exit, why] = [EXIT.timeout, `agy outlived --print-timeout by ${GUARD_S}s and was killed`]
+    else if (stopReason === 'guard') [exit, why] = [EXIT.timeout, `agy outlived --print-timeout by ${guardS - printS}s and was killed`]
     else if (!loaded) {
       const detail = `${result?.error ?? ''}\n${errText}`.trim().split('\n')[0]
       ;[exit, why] = [EXIT.setup, `job rules did not load: no canary ($JOB/${CANARY}) after the run${detail ? `; agy said: ${detail}` : ''}`]
     } else if (/print timeout after .*partial output/.test(errText))
-      [exit, why] = [EXIT.timeout, `--print-timeout (${timeoutS}s) expired mid-turn; the answer is partial`]
+      [exit, why] = [EXIT.timeout, `--print-timeout (${printS}s) expired mid-turn; the answer is partial`]
     else if (result?.denied_actions?.length)
       [exit, why] = [EXIT.denied, `agy was denied: ${result.denied_actions.map(d => d.display_name ?? d.action).join(', ')}`]
     else if (!result || result.status !== 'SUCCESS' || result.error || /AGY_ERROR/.test(errText) || code !== 0) {
       const detail = `${result?.error ?? ''}\n${errText}`.trim()
       ;[exit, why] = [classifyError(detail), `agy ${result?.status ?? `exited ${code}`}: ${detail.split('\n')[0] || 'no detail'}`]
     } else if (!result.response?.trim()) [exit, why] = [EXIT.empty, 'agy reported success with an empty answer']
+    else if (gates && gates.verdict !== 'OK' && gates.verdict !== 'not configured') [exit, why] = [EXIT.gate, gates.why]
     else [exit, why] = [EXIT.ok, 'agy finished']
 
     const answer = result?.response?.trim() ? result.response : said
@@ -500,15 +639,16 @@ function run(opts) {
     if (dropped) log(`dropped ${dropped} leading waiting line(s) from the answer; events.jsonl keeps them`)
     if (shown.trim()) process.stdout.write(shown.endsWith('\n') ? shown : `${shown}\n`)
     const denies = readHookLog(dir).filter(e => e.run === runId && e.hook === 'PreToolUse' && e.decision === 'deny')
-    report({ cwd, dir, model, exit, why, result, events, before, readOnly: opts.readOnly, stopped, denies, loaded })
-    updateMeta(dir, { verdict: why, blocked: denies.length })
+    report({ cwd, dir, model, exit, why, result, events, before, readOnly: opts.readOnly, stopped, denies, loaded, gates })
+    if (gates?.meta) setMetaGate(dir, gates.meta, { verdict: why, blocked: denies.length })
+    else updateMeta(dir, { verdict: why, blocked: denies.length })
     process.exit(exit)
   })
 }
 
 const [cmd, ...rest] = process.argv.slice(2)
 const opts = parseArgs(rest)
-if (cmd === 'run') run(opts)
+if (cmd === 'run') run(opts).catch(error => die(EXIT.failed, `runner crashed: ${error.stack ?? error.message}`))
 else if (cmd === 'check') {
   const agy = findAgy() ?? die(EXIT.missing, 'agy is not installed (looked in $AGY_BIN, ~/.local/bin, PATH)')
   const models = preflight(agy, opts.model ?? null)
@@ -516,7 +656,7 @@ else if (cmd === 'check') {
   console.log(`models: ${models.join(', ')}`)
 } else {
   console.log(`Usage:
-  node agy-run.mjs run --job-dir <dir> [--mode task|implement] [--read-only] [--model <id>] [--timeout 30m] [--resume <conversation-id>]
+  node agy-run.mjs run --job-dir <dir> [--mode task|implement] [--read-only] [--model <id>] [--timeout 30m] [--resume <conversation-id>] [--gate-config <path>]
   node agy-run.mjs check [--model <id>]
 Default model ${DEFAULT_MODEL}; exit codes: ${Object.entries(EXIT).map(([k, v]) => `${v} ${k}`).join(', ')}`)
   process.exit(cmd && !['help', '--help', '-h'].includes(cmd) ? EXIT.usage : 0)

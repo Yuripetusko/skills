@@ -10,6 +10,11 @@
 // FAKE_SLASH_FAIL   <hooks|agents>:<exit|signal>, print the JSON and then fail that call
 // FAKE_AGY_EVENTS   after PreInvocation, replay this stream-json file's events (its init skipped)
 //                   instead of the tool calls, answer and result
+// FAKE_ROUNDS_FILE  JSON list of tool-call lists, one per round after a Stop hook answers continue
+// FAKE_STOP_HOOK=0  never call the Stop hooks
+// FAKE_HOOK_TIMEOUT_S  kill a hook after this many seconds instead of its configured timeout
+// Like agy 1.3.3, a Stop hook that exits non-zero, prints no JSON or times out lets the run stop, and
+// the 11th consecutive continue is ignored. Each Stop answer is logged as a `fake_stop_hook` event.
 
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -61,11 +66,13 @@ const cwd = process.cwd()
 out({ event: 'init', init: { model: opt('--model'), cwd, tools: [], permission_mode: 'bypass' } })
 const handlers = event => Object.values(config).flatMap(spec => (spec[event] ?? []).flatMap(h => h.hooks ?? [h]))
 const callHook = (h, input) => {
-  const r = spawnSync('sh', ['-c', h.command], { cwd: path.dirname(hooksFile), input: JSON.stringify(input), encoding: 'utf8' })
+  const timeout = (Number(env.FAKE_HOOK_TIMEOUT_S) || h.timeout || 30) * 1000
+  const r = spawnSync('sh', ['-c', h.command], { cwd: path.dirname(hooksFile), input: JSON.stringify(input), encoding: 'utf8', timeout, killSignal: 'SIGKILL' })
+  if (r.status !== 0) return { failed: r.error?.code ?? r.signal ?? `exit ${r.status}` }
   try {
     return JSON.parse(r.stdout)
   } catch {
-    return {}
+    return { failed: 'not JSON' }
   }
 }
 const useHooks = env.FAKE_HOOKS !== '0' && !env.FAKE_FORGE
@@ -84,21 +91,37 @@ if (env.FAKE_AGY_EVENTS) {
   }
   process.exit(0)
 }
-const calls = env.FAKE_CALLS_FILE ? JSON.parse(fs.readFileSync(env.FAKE_CALLS_FILE, 'utf8')) : []
+const readList = file => (file ? JSON.parse(fs.readFileSync(file, 'utf8')) : [])
 let step = 0
-for (const call of calls) {
-  step++
-  const tool_info = { name: call.name, parameters: call.args }
-  out({ event: 'step_update', step_update: { step_index: step, state: 'ACTIVE', step_type: 'tool', tool_name: call.name, tool_info } })
-  const decisions = useHooks ? handlers('PreToolUse').map(h => callHook(h, { ...common, toolCall: call, stepIdx: step })) : []
-  const denied = decisions.some(d => d.decision !== 'allow')
-  if (!denied && call.name === 'write_to_file') {
-    fs.mkdirSync(path.dirname(call.args.TargetFile), { recursive: true })
-    fs.writeFileSync(call.args.TargetFile, call.args.CodeContent ?? '')
+const play = calls => {
+  for (const call of calls) {
+    step++
+    const tool_info = { name: call.name, parameters: call.args }
+    out({ event: 'step_update', step_update: { step_index: step, state: 'ACTIVE', step_type: 'tool', tool_name: call.name, tool_info } })
+    const decisions = useHooks ? handlers('PreToolUse').map(h => callHook(h, { ...common, toolCall: call, stepIdx: step })) : []
+    const denied = decisions.some(d => d.decision !== 'allow')
+    if (!denied && call.name === 'write_to_file') {
+      fs.mkdirSync(path.dirname(call.args.TargetFile), { recursive: true })
+      fs.writeFileSync(call.args.TargetFile, call.args.CodeContent ?? '')
+    }
+    out({ event: 'step_update', step_update: { step_index: step, state: denied ? 'ERROR' : 'DONE', step_type: 'tool', tool_name: call.name, tool_info } })
+    if (env.FAKE_SLEEP) sleep(env.FAKE_SLEEP)
   }
-  out({ event: 'step_update', step_update: { step_index: step, state: denied ? 'ERROR' : 'DONE', step_type: 'tool', tool_name: call.name, tool_info } })
-  if (env.FAKE_SLEEP) sleep(env.FAKE_SLEEP)
 }
-const text = 'Fake agy finished.'
-out({ event: 'step_update', step_update: { step_index: step + 1, state: 'DONE', step_type: 'agent_response', text_delta: text } })
-out({ event: 'result', result: { status: 'SUCCESS', response: text, duration_seconds: 1, conversation_id: 'fake-conv', denied_actions: [] } })
+const answer = text => {
+  step++
+  out({ event: 'step_update', step_update: { step_index: step, state: 'DONE', step_type: 'agent_response', text_delta: text } })
+  return text
+}
+play(readList(env.FAKE_CALLS_FILE))
+let response = answer('Fake agy finished.')
+const rounds = readList(env.FAKE_ROUNDS_FILE)
+for (let executionNum = 0; useHooks && env.FAKE_STOP_HOOK !== '0'; executionNum++) {
+  const answers = handlers('Stop').map(h => callHook(h, { ...common, executionNum, terminationReason: 'model_stop', fullyIdle: true }))
+  const cont = answers.find(a => a.decision === 'continue')
+  for (const a of answers) out({ event: 'fake_stop_hook', executionNum, answer: a })
+  if (!cont || executionNum >= 10) break
+  play(rounds[executionNum] ?? [])
+  response += `\n${answer(`Fake agy round ${executionNum + 2}.`)}`
+}
+out({ event: 'result', result: { status: 'SUCCESS', response, duration_seconds: 1, conversation_id: 'fake-conv', denied_actions: [] } })
