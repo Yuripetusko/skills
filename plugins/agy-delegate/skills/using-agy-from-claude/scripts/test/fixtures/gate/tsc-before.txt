@@ -1,0 +1,5 @@
+packages/a/src/x.ts(12,5): error TS2322: Type '(v: number) => void' is not assignable to type '(v: string) => void'.
+  Types of parameters 'v' and 'v' are incompatible.
+    Type 'string' is not assignable to type 'number'.
+packages/b/src/y.ts(4,10): error TS2339: Property 'size' does not exist on type 'Item'.
+error TS2318: Cannot find global type 'AsyncIterableIterator'.

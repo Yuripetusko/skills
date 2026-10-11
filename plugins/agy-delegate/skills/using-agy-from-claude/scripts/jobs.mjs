@@ -6,6 +6,8 @@
 // DELEGATE_JOBS_DIR) holding brief.md, meta.json, out.md, err.log and, for agy, events.jsonl. The
 // parent session and the user find jobs there without knowing which relay launched them, and
 // ROOT/jobs.mjs is a copy of this script at a path that does not depend on how the plugin is installed.
+// Commands whose logic lives in a sibling module (SIBLINGS) load it with a dynamic import, and `new`
+// copies those modules next to ROOT/jobs.mjs.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
@@ -18,6 +20,7 @@ const ROOT = process.env.DELEGATE_JOBS_DIR || path.join(os.homedir(), '.claude',
 const KEEP_JOBS = 50
 const KEEP_DAYS = 7
 const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }
+const SIBLINGS = ['gate.mjs']
 
 const USAGE = `Usage: node jobs.mjs <command>
   new <tool> [--label <text>]          create a job dir under ${ROOT}, print its path
@@ -28,6 +31,8 @@ const USAGE = `Usage: node jobs.mjs <command>
   cancel <job>                         stop a running job
   wt-setup [--base <ref>] [--install [full|deps]] [--allow-main]
   wt-finish --paths '<path|glob> ...' | --path <p> [--path <p>…] [--message <msg>] [--job <job>]
+  gate baseline --job <job> [--gate-config <path>] [--paths '<globs>'] | gate check --job <job> [--round <n>]
+                                       lint and type-check findings added since the baseline
 <job> is a job dir, its name, or a unique prefix of the name.`
 
 const git = (args, opts = {}) =>
@@ -106,9 +111,12 @@ function cmdNew(args) {
   fs.mkdirSync(ROOT, { recursive: true })
   prune()
   const self = fileURLToPath(import.meta.url)
-  const stable = path.join(ROOT, 'jobs.mjs')
-  if (self !== stable && fs.readFileSync(self, 'utf8') !== (fs.existsSync(stable) ? fs.readFileSync(stable, 'utf8') : ''))
-    fs.copyFileSync(self, stable)
+  for (const name of ['jobs.mjs', ...SIBLINGS]) {
+    const from = path.join(path.dirname(self), name)
+    const to = path.join(ROOT, name)
+    if (from !== to && fs.existsSync(from) && fs.readFileSync(from, 'utf8') !== (fs.existsSync(to) ? fs.readFileSync(to, 'utf8') : ''))
+      fs.copyFileSync(from, to)
+  }
   const d = new Date()
   const pad = n => String(n).padStart(2, '0')
   const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`
@@ -488,6 +496,14 @@ function cmdWtFinish(args) {
   console.log(git(['show', '--stat', '--format=committed %h %s', 'HEAD']).stdout.trim())
 }
 
+// The logic is in gate.mjs, one of SIBLINGS. A crash exits 2 (could not run), never 1 (findings added).
+async function cmdGate(args) {
+  const mod = await import('./gate.mjs').catch(e =>
+    fail(e.code === 'ERR_MODULE_NOT_FOUND' ? "gate.mjs is missing next to this jobs.mjs, probably an old copy. Use the plugin's delegate-jobs, or start any delegate job to refresh the copy" : e.message, 2),
+  )
+  await mod.cmdGate(args).catch(e => fail(`GATE ERROR: ${e.stack ?? e.message}`, 2))
+}
+
 const commands = {
   new: cmdNew,
   exec: cmdExec,
@@ -497,6 +513,7 @@ const commands = {
   cancel: cmdCancel,
   'wt-setup': cmdWtSetup,
   'wt-finish': cmdWtFinish,
+  gate: cmdGate,
 }
 if (path.basename(process.argv[1] ?? '') === 'jobs.mjs') {
   const [cmd, ...args] = process.argv.slice(2)
