@@ -4,7 +4,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { globToRegExp, resolveJob } from './jobs.mjs'
+import { globToRegExp, readMeta, resolveJob, updateMeta } from './jobs.mjs'
 
 export const EXIT = { ok: 0, failed: 1, error: 2, unconfigured: 3 }
 const CONFIG_NAME = path.join('.agents', 'delegate-gate.json')
@@ -487,6 +487,15 @@ export async function gateBaseline({ jobDir, root, configPath, paths }) {
   return { exitCode: snap.complete ? EXIT.ok : EXIT.error, verdict: snap.complete ? 'baseline' : 'error', file, result }
 }
 
+// The verdict goes into the job's meta.json for `jobs` and for the stop gate, which adds its own
+// fields (`rounds`) to the same record. Fields written by others stay, and only these four are set.
+const VERDICTS = { ok: 'OK', failed: 'FAILED', error: 'error', 'not configured': 'not configured' }
+function recordVerdict(jobDir, { verdict, round, added, removed }) {
+  if (!fs.existsSync(path.join(jobDir, 'meta.json'))) return
+  const gate = { ...(readMeta(jobDir).gate ?? {}), verdict: VERDICTS[verdict] ?? verdict, added, removed, round }
+  updateMeta(jobDir, { gate })
+}
+
 export async function gateCheck({ jobDir, round }) {
   const dir = gateDir(jobDir)
   const baseline = tryJson(path.join(dir, 'baseline.json'))
@@ -495,6 +504,7 @@ export async function gateCheck({ jobDir, round }) {
   const deltaFile = path.join(dir, `delta-${n}.json`)
   const finish = (exitCode, verdict, data) => {
     write(deltaFile, { round: n, verdict, exitCode, createdAt: new Date().toISOString(), ...data })
+    recordVerdict(jobDir, { verdict, round: n, added: data.added?.length ?? 0, removed: data.removed?.length ?? 0 })
     return { exitCode, verdict, file: deltaFile, round: n, ...data }
   }
   if (!baseline) return finish(EXIT.error, 'error', { complete: false, errors: [`no baseline at ${dir}/baseline.json`] })

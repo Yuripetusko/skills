@@ -240,7 +240,8 @@ function cmdJobs(args) {
     const took = j.endedAt ? `took ${dur(start, j.endedAt)}` : `${j.status} for ${dur(start)}`
     const exit = j.exitCode != null ? ` exit ${j.exitCode}` : ''
     const scope = j.scope ? `  scope ${j.scope === 'ok' ? 'OK' : 'VIOLATION'}${j.commit ? ` · commit ${j.commit}` : ''}` : ''
-    console.log(`${j.id}  ${j.endedAt ? j.status + exit + '  ' : ''}${took}${scope}  ${j.label ?? ''}`.trimEnd())
+    const gate = j.gate?.verdict ? `  gate ${j.gate.verdict}` : ''
+    console.log(`${j.id}  ${j.endedAt ? j.status + exit + '  ' : ''}${took}${scope}${gate}  ${j.label ?? ''}`.trimEnd())
     console.log(`    ${home(j.cwd)}${j.branch ? ` (${j.branch})` : ''}  ${lastLine(j) ?? ''}`.trimEnd())
   }
   console.log(`\nProgress: node ${home(path.join(ROOT, 'jobs.mjs'))} tail <job>   Stop: … cancel <job>`)

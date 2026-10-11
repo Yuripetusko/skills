@@ -217,6 +217,7 @@ describe('jobs.mjs gate', () => {
     return dir
   }
   const edit = (file, text) => fs.writeFileSync(path.join(repo, file), text)
+  const metaGate = dir => JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')).gate
   const reset = () => {
     spawnSync('git', ['checkout', '-q', '--', '.'], { cwd: repo })
     spawnSync('git', ['clean', '-qfd'], { cwd: repo })
@@ -255,6 +256,7 @@ describe('jobs.mjs gate', () => {
     assert.match(r.stdout, /^GATE OK: 0 added, 0 removed · round 1/)
     assert.ok(fs.existsSync(path.join(job, 'gate', 'after-1.json')))
     assert.ok(fs.existsSync(path.join(job, 'gate', 'delta-1.json')))
+    assert.deepEqual(metaGate(job), { verdict: 'OK', added: 0, removed: 0, round: 1 })
   })
 
   test('snapshots leave git status, refs, stash and the real index alone', () => {
@@ -275,6 +277,7 @@ describe('jobs.mjs gate', () => {
     const d = JSON.parse(fs.readFileSync(path.join(job, 'gate', 'delta-2.json'), 'utf8'))
     assert.deepEqual(d.renames, { 'packages/a/src/old-name.ts': 'packages/a/src/new-name.ts' })
     assert.equal(d.exitCode, 1)
+    assert.deepEqual(metaGate(job), { verdict: 'FAILED', added: 3, removed: 2, round: 2 })
     // The snapshot of the edited tree exists only as unreachable objects, which git gc prunes.
     assert.equal(gitSnapshot().refs, gitState.refs)
     assert.match(git(['fsck', '--unreachable', '--no-reflogs']), /unreachable tree/)
@@ -418,15 +421,30 @@ describe('jobs.mjs gate', () => {
     const c = run(['gate', 'check', '--job', j])
     assert.equal(c.status, 3)
     assert.match(c.stdout, /^GATE: not configured/)
+    assert.deepEqual(metaGate(j), { verdict: 'not configured', added: 0, removed: 0, round: 1 })
     const fresh = newJob('packages/a/**')
     const none = run(['gate', 'check', '--job', fresh])
     assert.equal(none.status, 2)
     assert.match(none.stdout, /^GATE ERROR: .*no baseline/)
+    assert.equal(metaGate(fresh).verdict, 'error')
   })
 
   test('the stable copy under DELEGATE_JOBS_DIR loads gate.mjs too', () => {
     assert.ok(fs.existsSync(path.join(jobsDir, 'gate.mjs')))
     const r = run(['gate', 'check', '--job', job], path.join(jobsDir, 'jobs.mjs'))
     assert.equal(r.status, 0, r.stdout + r.stderr)
+  })
+
+  test('a check keeps the fields others added to meta.gate, and `jobs` shows the verdict', () => {
+    const file = path.join(job, 'meta.json')
+    const meta = JSON.parse(fs.readFileSync(file, 'utf8'))
+    fs.writeFileSync(file, JSON.stringify({ ...meta, scope: 'ok', gate: { ...meta.gate, verdict: 'FAILED', rounds: 3 } }))
+    const r = run(['gate', 'check', '--job', job])
+    assert.equal(r.status, 0, r.stdout + r.stderr)
+    const gate = metaGate(job)
+    assert.equal(gate.verdict, 'OK')
+    assert.equal(gate.rounds, 3)
+    assert.match(run(['jobs']).stdout, new RegExp(`${path.basename(job)} .*scope OK {2}gate OK `))
+    assert.match(run(['jobs', '--json']).stdout, /"verdict": "OK"/)
   })
 })

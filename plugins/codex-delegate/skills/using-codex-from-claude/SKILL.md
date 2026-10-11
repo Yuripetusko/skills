@@ -14,7 +14,7 @@ definition that preloaded this skill says which modes you may use; everything el
 - You are a relay. Never analyse the code yourself, never author changes, never summarise or reorder
   Codex's output, and never substitute your own answer for a missing one. The one thing you may add
   is the optional `Relay notes` section in section 6. The only state you change goes through this
-  skill's helpers: the job directory, and in implementer mode `wt-setup` and `wt-finish`.
+  skill's helpers: the job directory, and in implementer mode `wt-setup`, `gate` and `wt-finish`.
 - One Codex job per relay, and one write job per checkout at a time. The runner refuses a second
   write job in the same checkout (exit 16). Read-only jobs, and jobs in other worktrees, run in
   parallel.
@@ -93,14 +93,52 @@ spaces, and an entry that contains spaces goes in double quotes.
    `timeout: 600000`: `node "$JOBS" wt-setup [--base <ref>] [--install | --install deps]`. It refuses a main checkout
    and a dirty worktree. `--install` runs the repo's `setup-worktree` script, or else a frozen
    install. If it fails or asks for input, stop and reply with its output.
-2. Append the rules: `cat "$SKILL/prompts/implementer.md" >> "<dir>/brief.md"`.
-3. Launch `task --write` as in section 5.
-4. After exit 0, run `node "$JOBS" wt-finish --job "<dir>" --paths '<the paths: value as written>'`, adding `--message "<commit>"` when
-   the brief has `commit:`. Codex's sandbox cannot write a worktree's git metadata, so committing
-   happens here. Its first line is the verdict, `SCOPE OK` or `SCOPE VIOLATION`: put that line, and
-   the commit sha if one was made, at the end of your reply's header line, then `wt-finish`'s full
-   output, then Codex's answer. A violation (exit 2) commits nothing, and you revert nothing: the
-   caller decides.
+2. Make sure a configured gate has its dependencies. When the checkout has `.agents/delegate-gate.json`
+   and no `node_modules`, run `node "$JOBS" wt-setup --install deps` in the foreground with
+   `timeout: 600000`, whatever the brief says about `install:`. Stop on a failure, as in step 1.
+3. Append the rules: `cat "$SKILL/prompts/implementer.md" >> "<dir>/brief.md"`.
+4. Take the gate baseline, after steps 1 to 3 and before the launch, in the foreground with
+   `timeout: 600000`:
+
+   ```bash
+   node "$JOBS" gate baseline --job "<dir>" --paths '<the paths: value as written>'
+   ```
+
+   It records the lint and type-check findings of the untouched worktree in `<dir>/gate/`. Expect
+   2 to 5 minutes on a large monorepo (the "Quality gate" section has the measured times). Exit 0
+   means the baseline is recorded. Exit 3 means the repo has no gate config: go on, the reply will
+   say so. Exit 2 means the gate could not run (no dependencies, a project that does not build, a
+   broken command): do not launch Codex, and reply with the output. A gate that cannot run would
+   leave the job unchecked.
+5. Launch `task --write` as in section 5.
+6. After exit 0, run the gate check first and `wt-finish` second. The gate check also runs in the
+   foreground with `timeout: 600000`:
+
+   ```bash
+   node "$JOBS" gate check --job "<dir>"
+   ```
+
+   It compares the worktree with the baseline and records the verdict in the job's `meta.json`, which
+   `node "$JOBS" jobs` shows as `gate OK|FAILED|error|not configured`. Its exit code is a verdict, not
+   a failure of yours: 0 `GATE OK`, 1 `GATE FAILED`, 2 `GATE ERROR`, 3 `GATE: not configured`.
+   Do not retry, do not ask Codex to fix findings, and do not revert anything. If the call hits the
+   Bash timeout, report `GATE ERROR: the check timed out` and tell the caller to run
+   `delegate-jobs gate check --job <dir>` themselves. The baseline stays in the job dir.
+7. Then run `node "$JOBS" wt-finish --job "<dir>" --paths '<the paths: value as written>'`, adding `--message "<commit>"` when
+   the brief has `commit:`. A failed gate does not stop it: the brief's `commit:` decides whether to
+   commit, and the caller decides what happens next. Codex's sandbox cannot write a worktree's git
+   metadata, so committing happens here. Its first line is the verdict, `SCOPE OK` or
+   `SCOPE VIOLATION`. A violation (exit 2) commits nothing, and you revert nothing: the caller decides.
+8. Build the reply from these parts, in this order:
+   - The gate's output, verbatim, when its first line starts with `GATE FAILED` or `GATE ERROR`.
+     The reply then opens with the verdict and the added findings.
+   - The header line, `Codex <mode> · job <id> · full output: <dir>/out.md`, ending with the scope
+     verdict, the commit sha if one was made, and `gate OK`, `gate FAILED`, `gate error` or
+     `gate not configured`. For example: `… · SCOPE OK · commit 1a2b3c4 · gate OK`.
+   - The gate's output, verbatim, when it was not already put first. Its first line carries the
+     added and removed counts, or reads `GATE: not configured`.
+   - `wt-finish`'s full output.
+   - Codex's answer.
 
 ## 5. Launch once, in the background
 
@@ -145,10 +183,12 @@ checkout. Write one short line per flag and quote the log. Leave the section out
 flagging. Never summarise, judge or correct Codex's answer in it.
 
 - **Exit 0.** Reply with a header line, `Codex <mode> · job <id> · full output: <dir>/out.md`, then
-  the contents of `<dir>/out.md` verbatim.
+  the contents of `<dir>/out.md` verbatim. In implementer mode, build the reply as section 4 step 8
+  says.
 - **Non-zero exit.** Reply with `Codex <mode> failed (exit <code>) · job <id>`, the last 15 lines of
   `err.log`, and the output of `node "$CODEX" status <id>`. Give no substitute answer. Exit 16 means
-  another write job holds this checkout; `node "$JOBS" jobs` names it.
+  another write job holds this checkout; `node "$JOBS" jobs` names it. In implementer mode, skip the
+  gate check and `wt-finish`.
 - If `err.log` says the model "is not supported when using Codex with a ChatGPT account", relaunch
   once with `--model sol` and say so in your reply.
 
@@ -206,9 +246,9 @@ last line, and the latest one) and then the job's outcome. Drop `--every` to get
 costs the watching agent more context. Use `tail <job> -f` when the job is already known.
 
 Job directories live in `~/.claude/delegate-jobs/` (override with `DELEGATE_JOBS_DIR`) and are pruned
-after 7 days. `scripts/jobs.mjs` and `scripts/diff.mjs` are shared with the `agy-delegate` plugin,
-which has identical copies. Each `new` copies both to `~/.claude/delegate-jobs/`, a path that does
-not depend on where the plugin is installed.
+after 7 days. `scripts/jobs.mjs`, `scripts/diff.mjs` and `scripts/gate.mjs` are shared with the
+`agy-delegate` plugin, which has identical copies. Each `new` copies all three to
+`~/.claude/delegate-jobs/`, a path that does not depend on where the plugin is installed.
 
 ## Diff and applicable rules
 
@@ -236,6 +276,37 @@ The base is `--base` (its merge-base with `HEAD`). Without it, a `--job` diff st
 the job started on, and anything else from the merge-base with `origin/main`, then `main`, then
 `HEAD`. `--json` prints the whole result on stdout. For `--pr`, the packages and `AGENTS.md` files
 come from the current checkout, not from the PR's head.
+
+## Quality gate
+
+`delegate-jobs gate` compares lint and type-check findings before and after a change and fails on
+any finding the change added. In implementer mode the relay runs it around the Codex job (section 4).
+The commands come from the target repo's committed `.agents/delegate-gate.json`. Without it the
+verdict is `GATE: not configured`, never a pass. `references/gate-config.md` has the config schema,
+the scope rules and the files written to `<job>/gate/`.
+
+```bash
+delegate-jobs gate baseline --job <job> [--gate-config <path>] [--paths '<globs>']
+delegate-jobs gate check --job <job> [--round <n>]
+```
+
+| Exit | First line of the output        | Meaning                                                                |
+| ---- | ------------------------------- | ---------------------------------------------------------------------- |
+| 0    | `GATE BASELINE` / `GATE OK`     | Baseline recorded, or no finding added                                 |
+| 1    | `GATE FAILED`                   | Findings added, or a changed file lies outside the baseline scope      |
+| 2    | `GATE ERROR`                    | A snapshot could not run, the baseline is missing, or the gate crashed |
+| 3    | `GATE: not configured`          | No config file and no `--gate-config`                                  |
+
+After the first line, `check` lists each added finding as `+ <rule>  <file>:<line>:<col>  <message>`,
+the files outside the baseline scope, and the removed counts by rule. The verdict also goes into the
+job's `meta.json` as `gate: {verdict, added, removed, round}`, and `delegate-jobs jobs` shows it as
+`gate OK|FAILED|error|not configured` after the scope verdict. A stale `jobs.mjs` copy without
+`gate.mjs` beside it exits 2 with nothing on stdout, so read the exit code first.
+
+Cost, measured on a pnpm monorepo with oxlint and `tsc -b`: a baseline and a check each take about
+2 minutes for one package, 2.5 minutes for the 12-package scope, and up to 5 minutes for the first
+whole-repo run in a fresh worktree with cold caches. Both calls run in the foreground, which Claude
+Code caps at 10 minutes.
 
 ## Where things live
 
