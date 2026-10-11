@@ -26,8 +26,8 @@ const USAGE = `Usage: node jobs.mjs <command>
   tail [<job>|--next] [-n <lines>] [-f] [--every <dur>]  recent progress (default: newest job);
                                        -f follows it to the end, --every condenses to one line per interval
   cancel <job>                         stop a running job
-  wt-setup [--base <ref>] [--install] [--allow-main]
-  wt-finish --paths '<path|glob> ...' | --path <p> [--path <p>…] [--message <commit message>]
+  wt-setup [--base <ref>] [--install [full|deps]] [--allow-main]
+  wt-finish --paths '<path|glob> ...' | --path <p> [--path <p>…] [--message <msg>] [--job <job>]
 <job> is a job dir, its name, or a unique prefix of the name.`
 
 const git = (args, opts = {}) =>
@@ -130,28 +130,29 @@ function cmdNew(args) {
   console.log(dir)
 }
 
-// One write job per checkout. mkdir is atomic, so two runners cannot both take the lock; a lock whose
-// owner process is gone is stale and gets replaced.
-function takeWriteLock(job) {
-  const key = createHash('sha256').update(job.toplevel).digest('hex').slice(0, 16)
-  const dir = path.join(ROOT, '.locks', key)
+// mkdir is atomic, so two processes cannot both take a lock; a lock whose owner process is gone is
+// stale and gets replaced. A lock without owner.json is mid-acquire, unless that was over a minute ago.
+function takeLock(name, owner) {
+  const dir = path.join(ROOT, '.locks', name)
   fs.mkdirSync(path.dirname(dir), { recursive: true })
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       fs.mkdirSync(dir)
-      fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ job: job.id, pid: process.pid }))
+      fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ owner, pid: process.pid }))
       return { dir }
     } catch (e) {
       if (e.code !== 'EEXIST') throw e
-      const owner = readJson(path.join(dir, 'owner.json'))
-      // No owner.json yet means another runner is mid-acquire, unless that was over a minute ago.
+      const held = readJson(path.join(dir, 'owner.json'))
       const young = Date.now() - fs.statSync(dir).mtimeMs < 60_000
-      if (owner ? alive(owner.pid) : young) return { busy: owner?.job ?? 'another job' }
+      if (held ? alive(held.pid) : young) return { busy: held?.owner ?? 'another process' }
       fs.rmSync(dir, { recursive: true, force: true })
     }
   }
-  return { busy: 'another job' }
+  return { busy: 'another process' }
 }
+// One write job per checkout.
+const takeWriteLock = job =>
+  takeLock(createHash('sha256').update(job.toplevel).digest('hex').slice(0, 16), job.id)
 
 // The runner sends the agent's answer and log to out.md and err.log and prints progress on its own
 // stdout, so the background Bash call (and the desktop app's task panel) shows a live tail.
@@ -177,6 +178,9 @@ function cmdExec(args) {
     write,
     pid: process.pid,
     command: cmd.slice(0, 3).map(a => path.basename(a)).join(' '),
+    // Recorded here, not at `new`: wt-setup may have reset the worktree in between.
+    head: gitOut(['rev-parse', '--short', 'HEAD']),
+    branch: gitOut(['branch', '--show-current']),
     startedAt: new Date().toISOString(),
   })
   console.log(`${job.id} started in ${home(job.cwd)}`)
@@ -226,7 +230,8 @@ function cmdJobs(args) {
     const start = j.startedAt ?? j.createdAt
     const took = j.endedAt ? `took ${dur(start, j.endedAt)}` : `${j.status} for ${dur(start)}`
     const exit = j.exitCode != null ? ` exit ${j.exitCode}` : ''
-    console.log(`${j.id}  ${j.endedAt ? j.status + exit + '  ' : ''}${took}  ${j.label ?? ''}`.trimEnd())
+    const scope = j.scope ? `  scope ${j.scope === 'ok' ? 'OK' : 'VIOLATION'}${j.commit ? ` · commit ${j.commit}` : ''}` : ''
+    console.log(`${j.id}  ${j.endedAt ? j.status + exit + '  ' : ''}${took}${scope}  ${j.label ?? ''}`.trimEnd())
     console.log(`    ${home(j.cwd)}${j.branch ? ` (${j.branch})` : ''}  ${lastLine(j) ?? ''}`.trimEnd())
   }
   console.log(`\nProgress: node ${home(path.join(ROOT, 'jobs.mjs'))} tail <job>   Stop: … cancel <job>`)
@@ -370,7 +375,6 @@ function cmdWtSetup(args) {
     if (r.status !== 0) fail(`git reset --keep ${base} refused:\n${r.stderr.trim()}`)
   }
   if (args.includes('--install')) {
-    // Prefer the repo's own worktree bootstrap (env files, dev-branch sync) over a bare install.
     const pm = [
       ['pnpm-lock.yaml', 'pnpm', ['install', '--frozen-lockfile', '--prefer-offline']],
       ['bun.lock', 'bun', ['install', '--frozen-lockfile']],
@@ -379,10 +383,26 @@ function cmdWtSetup(args) {
       ['package-lock.json', 'npm', ['ci']],
     ].find(([lock]) => fs.existsSync(path.join(top, lock)))
     if (!pm) fail('--install: no lockfile found')
+    // `full` (default) prefers the repo's own bootstrap (env files, dev-branch sync); `deps` only
+    // installs dependencies, which is enough for lint, type-check and most tests.
+    const mode = opt('--install') === 'deps' ? 'deps' : 'full'
     const scripts = readJson(path.join(top, 'package.json'))?.scripts ?? {}
-    const run = scripts['setup-worktree'] ? [pm[1], ['run', 'setup-worktree']] : [pm[1], pm[2]]
+    const bootstrap = mode === 'full' && scripts['setup-worktree']
+    const run = bootstrap ? [pm[1], ['run', 'setup-worktree']] : [pm[1], pm[2]]
+    // Bootstraps can prompt (1Password for env files) and collide when worktrees start together, so
+    // only one runs at a time on this machine; wait up to 5 minutes for the previous one.
+    let lock = null
+    if (bootstrap) {
+      const deadline = Date.now() + 5 * 60_000
+      while ((lock = takeLock('setup-worktree', top)).busy) {
+        if (Date.now() > deadline)
+          fail(`another setup-worktree (${lock.busy}) is still running after 5 min; retry, or use --install deps`)
+        spawnSync('sleep', ['5'])
+      }
+    }
     console.log(`$ ${run[0]} ${run[1].join(' ')}`)
     const r = spawnSync(run[0], run[1], { cwd: top, stdio: ['ignore', 'inherit', 'inherit'] })
+    if (lock?.dir) fs.rmSync(lock.dir, { recursive: true, force: true })
     if (r.status !== 0) fail(`${run[0]} ${run[1].join(' ')} exited ${r.status}`)
   }
   console.log(`ready: ${top} · branch ${gitOut(['branch', '--show-current']) || '(detached)'} · HEAD ${gitOut(['rev-parse', '--short', 'HEAD'])}`)
@@ -414,6 +434,8 @@ export function globToRegExp(glob) {
   }
   return new RegExp(`^${re}$`)
 }
+// Prints the verdict first (SCOPE OK / SCOPE VIOLATION) and, with --job, records it in that job's
+// meta.json so `jobs` shows it. Out-of-scope paths are never committed.
 function cmdWtFinish(args) {
   const opt = name => (args.includes(name) ? args[args.indexOf(name) + 1] : null)
   // --paths takes the brief's `paths:` value as one argument; quote an entry that contains spaces.
@@ -423,6 +445,8 @@ function cmdWtFinish(args) {
     ...args.flatMap((a, i) => (a === '--path' && args[i + 1] ? [args[i + 1]] : [])),
   ].filter(Boolean)
   if (!scope.length) fail('wt-finish needs --paths or --path')
+  const job = opt('--job') ? resolveJob(opt('--job')) : null
+  const record = patch => job && updateMeta(job.dir, patch)
   const top = gitOut(['rev-parse', '--show-toplevel'])
   process.chdir(top)
   const inScope = file =>
@@ -433,16 +457,34 @@ function cmdWtFinish(args) {
       return globToRegExp(clean).test(file)
     })
   const changed = changedPaths()
-  if (!changed.length) return console.log('No changes in the checkout.')
+  if (!changed.length) {
+    record({ scope: 'ok', scopeDetail: 'no changes' })
+    return console.log('SCOPE OK: no changes in the checkout.')
+  }
   const outside = changed.filter(c => !inScope(c.file))
-  changed.forEach(c => console.log(`${c.code} ${c.file}${inScope(c.file) ? '' : '   <- OUTSIDE SCOPE'}`))
-  if (outside.length) fail(`${outside.length} changed path(s) outside --paths; nothing committed`, 2)
+  if (outside.length) {
+    record({ scope: 'violation', outside: outside.map(c => c.file) })
+    console.log(`SCOPE VIOLATION: ${outside.length} of ${changed.length} changed path(s) are outside --paths. Nothing committed.`)
+    outside.forEach(c => console.log(`  outside: ${c.code} ${c.file}`))
+    console.log('In scope:')
+    changed.filter(c => inScope(c.file)).forEach(c => console.log(`  ${c.code} ${c.file}`))
+    process.exit(2)
+  }
+  console.log(`SCOPE OK: all ${changed.length} changed path(s) are inside --paths.`)
+  changed.forEach(c => console.log(`  ${c.code} ${c.file}`))
   const message = opt('--message')
-  if (!message) return console.log('All changes are inside --paths. Not committing (no --message).')
+  if (!message) {
+    record({ scope: 'ok', commit: null })
+    return console.log('Not committing (no --message).')
+  }
   const add = git(['add', '-A', '--', ...new Set(changed.map(c => c.file))])
   if (add.status !== 0) fail(add.stderr.trim())
   const commit = git(['commit', '-q', '-m', message])
-  if (commit.status !== 0) fail(`git commit failed:\n${commit.stdout}${commit.stderr}`)
+  if (commit.status !== 0) {
+    record({ scope: 'ok', commit: 'failed' })
+    fail(`git commit failed:\n${commit.stdout}${commit.stderr}`)
+  }
+  record({ scope: 'ok', commit: gitOut(['rev-parse', '--short', 'HEAD']) })
   console.log(git(['show', '--stat', '--format=committed %h %s', 'HEAD']).stdout.trim())
 }
 

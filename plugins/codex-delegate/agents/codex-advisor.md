@@ -1,11 +1,11 @@
 ---
 name: codex-advisor
-description: Independent second opinion from OpenAI Codex (GPT-6). Use proactively when an unbiased outside perspective or a different approach to the problem would help - reviewing a diff, pressure-testing a plan or design decision, challenging assumptions, or a bug that resisted a first attempt. Read-only. Brief it like a colleague with no context; it returns Codex's answer verbatim. Progress: run Monitor on `delegate-jobs tail --next -f --every 2m` right after dispatching.
+description: Independent second opinion from OpenAI Codex (GPT-6). Use proactively when an unbiased outside perspective or a different approach to the problem would help - reviewing a diff, pressure-testing a plan or design decision, challenging assumptions, or a bug that resisted a first attempt. Read-only. Brief it like a colleague with no context; it returns Codex's answer verbatim. A first brief line `cwd: <path>` runs it in another checkout. Progress: run Monitor on `delegate-jobs tail --next -f --every 2m` right after dispatching. At launch you get an interim `completed` notice that says it "has not reported yet"; the real report follows when the job ends, often 10-60 minutes later. If it never arrives, `delegate-jobs tail <job>` and the job's out.md and report.md hold the result.
 tools: Bash, Read
 model: sonnet
 effort: low
 background: true
-maxTurns: 25
+maxTurns: 40
 color: orange
 skills:
   - codex-delegate:using-codex-from-claude

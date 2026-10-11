@@ -35,7 +35,8 @@ JOBS="$SKILL/scripts/jobs.mjs"; AGY="$SKILL/scripts/agy-run.mjs"
 Claude Code writes this skill's directory into the first line when it loads the skill. If that line
 shows a variable name instead of a path, use the "Base directory for this skill" path instead.
 
-Stay in the directory you were started in: agy works on that checkout.
+Work in the directory you were started in, or in the brief's `cwd:` when it has one: then begin
+every Bash call with `cd "<cwd>" &&`. The job and agy run in that checkout.
 
 ## 1. Job directory and brief
 
@@ -43,13 +44,15 @@ Create the job with `node "$JOBS" new agy --label "<mode>: <a few words of the t
 directory; carry the literal path forward. Save the brief exactly as you received it to
 `<dir>/brief.md` with a quoted heredoc. Add nothing: the runner puts agy's preamble in front of it.
 
-An implement brief may start with header lines, then a blank line and the task. Read them yourself;
-leave them in the saved brief, where agy sees `paths:` too.
+A brief may start with header lines, then a blank line and the task. Read them yourself; leave
+them in the saved brief, where agy sees `paths:` too.
 
 | Header             | Means                                                                       |
 | ------------------ | --------------------------------------------------------------------------- |
+| `cwd: <path>`      | Run in that checkout instead of your own directory (any mode)              |
 | `base: <ref>`      | Reset this worktree to `<ref>` before agy starts (Agent worktrees are cut from `main`) |
-| `install: yes`     | Run the repo's `setup-worktree` script, or a frozen install from the lockfile |
+| `install: yes`     | Run the repo's `setup-worktree` script (one at a time per machine), or a frozen install |
+| `install: deps`    | Only a frozen dependency install: enough for lint and type-check, no env files |
 | `paths: <p> <p>…`  | Paths or globs agy may change, separated by spaces; an entry with spaces goes in double quotes. Required for implement; ask for it if missing |
 | `commit: <msg>`    | Commit agy's changes with this message when they stay inside `paths`       |
 | `model: <id>`      | agy model to use                                                            |
@@ -68,7 +71,7 @@ leave them in the saved brief, where agy sees `paths:` too.
 Only when the brief has `base:` or `install:`. Run in the foreground with `timeout: 600000`:
 
 ```bash
-node "$JOBS" wt-setup [--base <ref>] [--install]
+node "$JOBS" wt-setup [--base <ref>] [--install | --install deps]
 ```
 
 It refuses a main checkout (pass `--allow-main` only if the brief says so) and a worktree with
@@ -105,9 +108,12 @@ after the run, and any processes it left running that the runner stopped.
 
 - **Exit 0.** Reply with a header line, `agy <mode> · <job> · <model>`, then `<dir>/out.md`
   verbatim, then `report.md` verbatim.
-- **Implement mode, after exit 0.** Run `node "$JOBS" wt-finish --paths '<the paths: value as written>'`, adding
-  `--message "<commit>"` when the brief has `commit:`. Append its output to your reply. Exit 2 means
-  changes outside `paths`. Nothing was committed then, and you do not revert anything: report it.
+- **Implement mode, after exit 0.** First run
+  `node "$JOBS" wt-finish --job "<dir>" --paths '<the paths: value as written>'`, adding
+  `--message "<commit>"` when the brief has `commit:`. Its first line is the verdict: `SCOPE OK` or
+  `SCOPE VIOLATION`. Put that line, and the commit sha if one was made, at the end of your header
+  line, then `wt-finish`'s full output, then `out.md` and `report.md`. A violation (exit 2) commits
+  nothing, and you revert nothing: the caller decides.
 - **Non-zero exit.** Reply with `agy <mode> failed (exit <code>: <label>) · <job>`, then `report.md`,
   then the last 15 lines of `<dir>/agy-stderr.log`. If `out.md` has text, include it, labelled
   partial. Give no substitute answer, and skip `wt-finish`.

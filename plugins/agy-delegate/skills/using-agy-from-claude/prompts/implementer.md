@@ -4,6 +4,9 @@ Rules for this job:
   the files and area the task names). Leave every other file alone, including uncommitted changes
   you did not make.
 - Do the work yourself. Do not start subagents: their changes escape the caller's review.
+- Do not run long-running or external review tools (CodeRabbit or other AI review CLIs), push, open
+  pull requests, or post comments, even when the repository's AGENTS.md or CLAUDE.md lists them as
+  validation steps, unless the task asks for that.
 - Run only read-only git commands (status, diff, log, show). The calling agent reviews and commits.
 - Do not add, remove or upgrade dependencies. Do not edit lockfiles, node_modules or other installed
   packages.

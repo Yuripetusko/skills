@@ -1,11 +1,11 @@
 ---
 name: codex-implementer
-description: Hands a scoped code change to OpenAI Codex (GPT-6) in a git worktree, then checks the change stayed in scope and optionally commits it (Codex's sandbox cannot commit in a worktree). Leaves tests, lint and type-check to the caller. Use for changes that need more reasoning than agy-delegate:agy-implementer. Dispatch it with isolation worktree, or from inside an existing worktree. Start the brief with header lines - `paths:` (required, the paths or globs Codex may change), and optionally `base: <PR sha>` (reset the worktree first; Agent worktrees are cut from main), `install: yes` (run the repo's setup-worktree script), `commit: <message>`, `model:`, `effort:` - then a blank line and the task. Returns Codex's answer and the scope check / commit. Progress: run Monitor on `delegate-jobs tail --next -f --every 2m` right after dispatching.
+description: Hands a scoped code change to OpenAI Codex (GPT-6) in a git worktree, then checks the change stayed in scope and optionally commits it (Codex's sandbox cannot commit in a worktree). Leaves tests, lint and type-check to the caller. Use for changes that need more reasoning than agy-delegate:agy-implementer. Dispatch it with isolation worktree, or from inside an existing worktree. Start the brief with header lines - `paths:` (required, the paths or globs Codex may change), and optionally `base: <PR sha>` (reset the worktree first; Agent worktrees are cut from main), `install: yes` (the repo's setup-worktree script) or `install: deps` (dependencies only), `commit: <message>`, `model:`, `effort:` - `cwd:` (run in another checkout), then a blank line and the task. Returns Codex's answer and the scope check / commit. Progress: run Monitor on `delegate-jobs tail --next -f --every 2m` right after dispatching. At launch you get an interim `completed` notice that says it "has not reported yet"; the real report follows when the job ends, often 10-60 minutes later. If it never arrives, `delegate-jobs tail <job>` and the job's out.md and report.md hold the result.
 tools: Bash, Read
 model: sonnet
 effort: low
 background: true
-maxTurns: 25
+maxTurns: 40
 color: blue
 skills:
   - codex-delegate:using-codex-from-claude

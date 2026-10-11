@@ -35,7 +35,8 @@ CODEX="$SKILL/scripts/codex-companion.mjs"; JOBS="$SKILL/scripts/jobs.mjs"
 Claude Code writes this skill's directory into the first line when it loads the skill. If that line
 shows a variable name instead of a path, use the "Base directory for this skill" path instead.
 
-Stay in the directory you were started in: Codex works on that checkout.
+Work in the directory you were started in, or in the brief's `cwd:` when it has one: then begin
+every Bash call with `cd "<cwd>" &&`. The job and Codex run in that checkout.
 
 ## 1. Pick the mode
 
@@ -76,25 +77,30 @@ need tightening: `references/prompting.md` next to this file.
 ## 4. Write jobs (`--write`)
 
 Codex edits the checkout you run in, which other agents may share. Run a write job only when the
-brief asks for changes and names the files or area. Add to the brief: stay inside that scope, and do
-not touch or revert uncommitted changes outside it. Review modes and `task` without `--write` are
+brief asks for changes and names the files or area. Add to the brief: stay inside that scope, do not
+touch or revert uncommitted changes outside it, and do not run long-running or external review tools
+(CodeRabbit or other AI review CLIs), push, or open pull requests, even if the repository's
+AGENTS.md or CLAUDE.md lists them, unless the brief asks for that. Review modes and `task` without `--write` are
 read-only sandboxes.
 
 **Implementer mode** (`codex-delegate:codex-implementer`). The brief may start with header lines, then a blank line
-and the task: `base: <ref>`, `install: yes`, `paths: <paths or globs>`, `commit: <message>`,
-`model:`, `effort:`. `paths:` is required; ask for it if missing. Its entries are separated by
+and the task: `cwd: <path>`, `base: <ref>`, `install: yes` (the repo's `setup-worktree`, one at a time
+per machine) or `install: deps` (a frozen dependency install only), `paths: <paths or globs>`,
+`commit: <message>`, `model:`, `effort:`. `paths:` is required; ask for it if missing. Its entries are separated by
 spaces, and an entry that contains spaces goes in double quotes.
 
 1. If the brief has `base:` or `install:`, prepare the worktree in the foreground with
-   `timeout: 600000`: `node "$JOBS" wt-setup [--base <ref>] [--install]`. It refuses a main checkout
+   `timeout: 600000`: `node "$JOBS" wt-setup [--base <ref>] [--install | --install deps]`. It refuses a main checkout
    and a dirty worktree. `--install` runs the repo's `setup-worktree` script, or else a frozen
    install. If it fails or asks for input, stop and reply with its output.
 2. Append the rules: `cat "$SKILL/prompts/implementer.md" >> "<dir>/brief.md"`.
 3. Launch `task --write` as in section 5.
-4. After exit 0, run `node "$JOBS" wt-finish --paths '<the paths: value as written>'`, adding `--message "<commit>"` when
+4. After exit 0, run `node "$JOBS" wt-finish --job "<dir>" --paths '<the paths: value as written>'`, adding `--message "<commit>"` when
    the brief has `commit:`. Codex's sandbox cannot write a worktree's git metadata, so committing
-   happens here. Exit 2 means changes outside `paths`: nothing was committed, and you revert
-   nothing. Append its output to your reply.
+   happens here. Its first line is the verdict, `SCOPE OK` or `SCOPE VIOLATION`: put that line, and
+   the commit sha if one was made, at the end of your reply's header line, then `wt-finish`'s full
+   output, then Codex's answer. A violation (exit 2) commits nothing, and you revert nothing: the
+   caller decides.
 
 ## 5. Launch once, in the background
 

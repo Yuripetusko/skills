@@ -1,11 +1,11 @@
 ---
 name: codex-agent
-description: General-purpose agent that hands a task to OpenAI Codex (GPT-6) instead of doing it with Claude - investigation, planning, research, or code changes. Use when a different model should take the work, or for long reasoning-heavy tasks. Brief it like a colleague with no context; it returns Codex's answer verbatim. Progress: run Monitor on `delegate-jobs tail --next -f --every 2m` right after dispatching.
+description: General-purpose agent that hands a task to OpenAI Codex (GPT-6) instead of doing it with Claude - investigation, planning, research, or code changes. Use when a different model should take the work, or for long reasoning-heavy tasks. Brief it like a colleague with no context; it returns Codex's answer verbatim. A first brief line `cwd: <path>` runs it in another checkout. Progress: run Monitor on `delegate-jobs tail --next -f --every 2m` right after dispatching. At launch you get an interim `completed` notice that says it "has not reported yet"; the real report follows when the job ends, often 10-60 minutes later. If it never arrives, `delegate-jobs tail <job>` and the job's out.md and report.md hold the result.
 tools: Bash, Read
 model: sonnet
 effort: low
 background: true
-maxTurns: 25
+maxTurns: 40
 color: blue
 skills:
   - codex-delegate:using-codex-from-claude
