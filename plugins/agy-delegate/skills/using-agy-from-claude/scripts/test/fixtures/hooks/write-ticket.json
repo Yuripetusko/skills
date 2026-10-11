@@ -1,0 +1,12 @@
+{
+  "conversationId": "00000000-0000-4000-8000-000000000001",
+  "workspacePaths": ["{{agyDir}}", "{{worktree}}"],
+  "transcriptPath": "{{agyDir}}/../transcript.jsonl",
+  "artifactDirectoryPath": "{{agyDir}}/../artifacts",
+  "modelName": "gemini-3.8-flash-low",
+  "toolCall": {
+    "name": "replace_file_content",
+    "args": { "TargetFile": "{{worktree}}/specs/feature/tickets/feature-ticket.md", "Instruction": "Set status to done", "ReplacementChunks": [] }
+  },
+  "stepIdx": 14
+}

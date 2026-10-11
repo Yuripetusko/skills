@@ -1,6 +1,6 @@
 // Run with: node --test plugins/agy-delegate/skills/using-agy-from-claude/scripts/test/*.test.mjs
-// Replays recorded-style agy events through a fake AGY_BIN and checks the out.md that `exec` writes.
-// Nothing here needs a live agy or a sign-in.
+// Replays recorded-style agy events through fixtures/fake-agy.mjs (AGY_BIN) and checks the out.md that
+// `exec` writes. Nothing here needs a live agy or a sign-in.
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -16,24 +16,9 @@ const AGY_RUN = path.join(SCRIPTS, 'agy-run.mjs')
 const scratch = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'out-md-test-'))
 after(() => fs.rmSync(scratch, { recursive: true, force: true }))
 
-// The fake agy answers `models` with one model and otherwise replays $FAKE_AGY_EVENTS on stdout,
-// pointing the init event at its own cwd, which is the check agy-run makes.
-const fakeAgy = path.join(scratch, 'fake-agy')
-fs.writeFileSync(
-  fakeAgy,
-  `#!${process.execPath}
-const fs = require('node:fs')
-if (process.argv[2] === 'models') {
-  console.log('gemini-3.8-flash-high')
-  process.exit(0)
-}
-for (const line of fs.readFileSync(process.env.FAKE_AGY_EVENTS, 'utf8').split('\\n').filter(Boolean)) {
-  const e = JSON.parse(line)
-  if (e.event === 'init') e.init.cwd = process.cwd()
-  console.log(JSON.stringify(e))
-}
-`,
-)
+// The shared fake agy answers `models`, `/hooks` and `/agents`, runs the job's PreInvocation hook so the
+// canary is written, then replays $FAKE_AGY_EVENTS on stdout with an init event that names its cwd.
+const fakeAgy = path.join(SCRIPTS, 'test', 'fixtures', 'fake-agy.mjs')
 fs.chmodSync(fakeAgy, 0o755)
 
 const env = { ...process.env, DELEGATE_JOBS_DIR: path.join(scratch, 'jobs-root'), AGY_BIN: fakeAgy }
