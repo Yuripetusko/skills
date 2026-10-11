@@ -160,9 +160,35 @@ costs the watching agent more context. Use `tail <job> -f` when the job is alrea
 Jobs live in `~/.claude/delegate-jobs/<tool>-<date>-<time>-<rand>/` (override with
 `DELEGATE_JOBS_DIR`). Each holds `meta.json`, `brief.md`, `input.jsonl`, `events.jsonl` (agy's
 stream), `agy-stderr.log`, `out.md`, `err.log` and `report.md`. Old jobs are pruned after 7 days.
-`jobs.mjs` is shared with the `codex-delegate` plugin, which has an identical copy. Each `new` copies
-it to `~/.claude/delegate-jobs/jobs.mjs`, a path that does not depend on where the plugin is
-installed.
+`jobs.mjs` and `diff.mjs` are shared with the `codex-delegate` plugin, which has identical copies.
+Each `new` copies both to `~/.claude/delegate-jobs/`, a path that does not depend on where the
+plugin is installed.
+
+## Diff and applicable rules
+
+`delegate-jobs diff` writes a clean diff of a change and the convention files that govern it. It
+needs `git`, and `gh` (signed in) for `--pr`. A missing tool, a directory that is not a git checkout
+or a base ref that does not resolve stops it with a message and a non-zero exit.
+
+```bash
+delegate-jobs diff --job <job> [--base <ref>] [--out <dir>]   # the job's worktree plus untracked files
+delegate-jobs diff --pr <n> [--out <dir>]                      # a GitHub PR, read through gh
+```
+
+It writes four files to `--out` (default `<job dir>/diff/`, or a temp dir without `--job`):
+
+- `diff.patch` is the full unified diff.
+- `diff-numbered.txt` has the same hunks with base (`L`) and head (`R`) line numbers on every line.
+  Generated and lock files get no hunks there.
+- `files.json` has one entry per changed file: path, status, generated flag and owning package (the
+  nearest `package.json`).
+- `rules.json` lists the root `AGENTS.md` and every `AGENTS.md` between a changed file and the root,
+  with byte sizes and an `over24kb` flag, because agy truncates a rules file at 24,000 bytes.
+
+The base is `--base` (its merge-base with `HEAD`). Without it, a `--job` diff starts from the commit
+the job started on, and anything else from the merge-base with `origin/main`, then `main`, then
+`HEAD`. `--json` prints the whole result on stdout. For `--pr`, the packages and `AGENTS.md` files
+come from the current checkout, not from the PR's head.
 
 ## Measured on agy 1.3.3 (2026-10-11)
 
