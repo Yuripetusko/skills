@@ -142,6 +142,63 @@ describe('parseDiff', () => {
   })
 })
 
+describe('parseDiff quoting and repeated paths', () => {
+  test('decodes octal escapes as UTF-8 bytes, in headers, ---/+++ lines and rename lines', () => {
+    const diff = [
+      'diff --git "a/caf\\303\\251/x.ts" "b/caf\\303\\251/x.ts"',
+      'index 111..222 100644',
+      '--- "a/caf\\303\\251/x.ts"',
+      '+++ "b/caf\\303\\251/x.ts"',
+      '@@ -1 +1 @@',
+      '-old',
+      '+new',
+      'diff --git "a/\\360\\237\\230\\200.md" "b/\\360\\237\\230\\200.md"',
+      'old mode 100644',
+      'new mode 100755',
+      'diff --git "a/d\\303\\251but/a.ts" "b/fin\\303\\251/a.ts"',
+      'similarity index 100%',
+      'rename from "d\\303\\251but/a.ts"',
+      'rename to "fin\\303\\251/a.ts"',
+      'diff --git "a/tab\\there \\"q\\" \\\\.ts" "b/tab\\there \\"q\\" \\\\.ts"',
+      'old mode 100644',
+      'new mode 100755',
+      '',
+    ].join('\n')
+    const files = parseDiff(diff)
+    assert.deepEqual([...files.keys()], ['café/x.ts', '😀.md', 'finé/a.ts', 'tab\there "q" \\.ts'])
+    assert.equal(files.get('café/x.ts').additions, 1)
+    assert.equal(files.get('finé/a.ts').oldPath, 'début/a.ts')
+  })
+  test('one record keeps both sections when a path is deleted and then recreated', () => {
+    const diff = [
+      'diff --git a/src/config.ts b/src/config.ts',
+      'deleted file mode 100644',
+      'index 111..000',
+      '--- a/src/config.ts',
+      '+++ /dev/null',
+      '@@ -1,2 +0,0 @@',
+      '-one',
+      '-two',
+      'diff --git a/src/config.ts b/src/config.ts',
+      'new file mode 100644',
+      'index 000..222',
+      '--- /dev/null',
+      '+++ b/src/config.ts',
+      '@@ -0,0 +1 @@',
+      '+fresh',
+      '',
+    ].join('\n')
+    const files = parseDiff(diff)
+    assert.equal(files.size, 1)
+    const config = files.get('src/config.ts')
+    assert.deepEqual([config.status, config.replaced, config.additions, config.deletions, config.hunks.length], ['modified', true, 1, 2, 2])
+    const numbered = numberedDiff([{ ...config, generated: false }])
+    assert.match(numbered, /\[replaced\]/)
+    assert.match(numbered, /L1\s+\|-one/)
+    assert.match(numbered, /R1 \|\+fresh/)
+  })
+})
+
 describe('applicableRules', () => {
   test('lists the root file and every AGENTS.md on the way up from a changed file', () => {
     const repo = fresh('rules')
@@ -237,6 +294,47 @@ describe('delegate-jobs diff on a worktree', () => {
     diffCli(repo, ['--base', 'HEAD', '--out', inside])
     diffCli(repo, ['--base', 'HEAD', '--out', inside])
     assert.equal(readJson(inside, 'files.json').some(f => f.path.startsWith('.diff-out/')), false)
+  })
+})
+
+describe('delegate-jobs diff with repeated paths and moves', () => {
+  test('a staged deletion recreated as an untracked file keeps the removed lines', () => {
+    const repo = makeRepo()
+    git(repo, 'rm', '-q', 'packages/lib/src/b.ts')
+    write(repo, 'packages/lib/src/b.ts', 'export const replaced = 1\n')
+    const out = path.join(scratch, 'out-recreated')
+    assert.equal(diffCli(repo, ['--base', 'HEAD', '--out', out]).status, 0)
+    const entries = readJson(out, 'files.json').filter(f => f.path === 'packages/lib/src/b.ts')
+    assert.equal(entries.length, 1)
+    assert.deepEqual(
+      [entries[0].status, entries[0].replaced, entries[0].untracked, entries[0].additions, entries[0].deletions],
+      ['modified', true, true, 1, 10],
+    )
+    const numbered = readOut(out, 'diff-numbered.txt')
+    assert.match(numbered, /L1\s+\|-line 1\n/)
+    assert.match(numbered, /R1 \|\+export const replaced = 1/)
+  })
+  test('a file replaced by a symlink shows both the removed lines and the link', () => {
+    const repo = makeRepo()
+    fs.rmSync(path.join(repo, 'docs/notes.md'))
+    fs.symlinkSync('same.md', path.join(repo, 'docs/notes.md'))
+    const out = path.join(scratch, 'out-typechange')
+    assert.equal(diffCli(repo, ['--base', 'HEAD', '--out', out]).status, 0)
+    const entries = readJson(out, 'files.json').filter(f => f.path === 'docs/notes.md')
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].deletions, 12)
+    assert.equal(entries[0].additions, 1)
+    const numbered = readOut(out, 'diff-numbered.txt')
+    assert.match(numbered, /L12\s+\|-line 12/)
+    assert.match(numbered, /R1 \|\+same\.md/)
+  })
+  test('a rename also lists the AGENTS.md of the directory the file moved out of', () => {
+    const repo = makeRepo()
+    git(repo, 'mv', 'packages/app/src/a.ts', 'packages/lib/src/a.ts')
+    const out = path.join(scratch, 'out-move')
+    assert.equal(diffCli(repo, ['--base', 'HEAD', '--out', out]).status, 0)
+    assert.deepEqual(readJson(out, 'files.json').map(f => [f.path, f.oldPath]), [['packages/lib/src/a.ts', 'packages/app/src/a.ts']])
+    assert.deepEqual(readJson(out, 'rules.json').map(r => r.path), ['AGENTS.md', 'packages/app/AGENTS.md'])
   })
 })
 
@@ -387,6 +485,23 @@ describe('install checks', () => {
     assert.equal(json.base, null)
     assert.deepEqual(readJson(out, 'files.json').map(f => [f.path, f.additions, f.package]), [['packages/lib/src/b.ts', 1, 'packages/lib']])
     assert.deepEqual(readJson(out, 'rules.json').map(r => r.path), ['AGENTS.md'])
+  })
+  test('--pr decodes a quoted Unicode path from the patch and finds its AGENTS.md', () => {
+    const repo = makeRepo()
+    write(repo, 'café/AGENTS.md', 'cafe rules\n')
+    write(repo, 'café/x.ts', 'old\n')
+    const bin = fresh('gh-quoted')
+    const patch = path.join(bin, 'pr.patch')
+    fs.writeFileSync(
+      patch,
+      ['diff --git "a/caf\\303\\251/x.ts" "b/caf\\303\\251/x.ts"', '--- "a/caf\\303\\251/x.ts"', '+++ "b/caf\\303\\251/x.ts"', '@@ -1 +1 @@', '-old', '+new', ''].join('\n'),
+    )
+    fs.writeFileSync(path.join(bin, 'gh'), `#!/bin/sh\n[ "$1" = pr ] && [ "$2" = diff ] && exec /bin/cat "${patch}"\nexit 0\n`, { mode: 0o755 })
+    const out = path.join(scratch, 'out-pr-quoted')
+    const r = diffCli(repo, ['--pr', '3', '--out', out], { PATH: `${bin}:${gitOnly}` })
+    assert.equal(r.status, 0, r.stderr)
+    assert.deepEqual(readJson(out, 'files.json').map(f => f.path), ['café/x.ts'])
+    assert.deepEqual(readJson(out, 'rules.json').map(r => r.path), ['AGENTS.md', 'café/AGENTS.md'])
   })
   test('--pr and --base together are refused', () => {
     const r = diffCli(makeRepo(), ['--pr', '7', '--base', 'HEAD'])

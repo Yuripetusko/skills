@@ -41,12 +41,31 @@ const readJson = file => {
   }
 }
 
-// Parsing. A quoted path has C-style escapes; git only quotes names with tabs, quotes or backslashes
-// once core.quotePath is off.
-const unquote = text =>
-  text.startsWith('"') && text.endsWith('"')
-    ? text.slice(1, -1).replace(/\\(["\\tn])/g, (_, c) => ({ t: '\t', n: '\n' })[c] ?? c)
-    : text
+// Parsing. git quotes a path in C style: named escapes and octal bytes (`caf\303\251`), which are
+// collected as bytes and decoded as UTF-8 together. gh's patch ignores the local core.quotePath, so
+// non-ASCII names arrive quoted.
+const NAMED_ESCAPES = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13 }
+function unquote(text) {
+  if (text.length < 2 || !text.startsWith('"') || !text.endsWith('"')) return text
+  const body = text.slice(1, -1)
+  const bytes = []
+  for (let i = 0; i < body.length; ) {
+    const octal = body[i] === '\\' ? /^[0-7]{1,3}/.exec(body.slice(i + 1)) : null
+    if (octal) {
+      bytes.push(parseInt(octal[0], 8) & 0xff)
+      i += 1 + octal[0].length
+    } else if (body[i] === '\\' && i + 1 < body.length) {
+      const next = body[i + 1]
+      bytes.push(...(next in NAMED_ESCAPES ? [NAMED_ESCAPES[next]] : Buffer.from(next)))
+      i += 2
+    } else {
+      const char = String.fromCodePoint(body.codePointAt(i))
+      bytes.push(...Buffer.from(char))
+      i += char.length
+    }
+  }
+  return Buffer.from(bytes).toString('utf8')
+}
 const stripPrefix = text => {
   const clean = unquote(text.replace(/\t$/, '')) // git adds a trailing tab after names with spaces
   return clean === '/dev/null' ? null : clean.replace(/^[ab]\//, '')
@@ -62,7 +81,23 @@ function headerPath(rest) {
     : null
 }
 
-// Returns Map<path, { path, oldPath, status, binary, additions, deletions, hunks: [{ header, lines }] }>.
+// A path can appear in two sections: a type change (file to symlink), or a staged deletion whose path is
+// recreated as an untracked file. One record keeps both, deleted lines and added lines.
+function mergeSections(first, next) {
+  const statuses = new Set([first.status, next.status])
+  const replaced = statuses.has('deleted') && statuses.has('added')
+  return {
+    ...first,
+    status: replaced ? 'modified' : first.status,
+    replaced: first.replaced || replaced,
+    binary: first.binary || next.binary,
+    additions: first.additions + next.additions,
+    deletions: first.deletions + next.deletions,
+    hunks: [...first.hunks, ...next.hunks],
+  }
+}
+
+// Returns Map<path, { path, oldPath, status, binary, replaced, additions, deletions, hunks: [{ header, lines }] }>.
 // `lines` keeps display order; each line has the base (left) and head (right) number or null.
 export function parseDiff(diffText) {
   const files = new Map()
@@ -72,7 +107,7 @@ export function parseDiff(diffText) {
   let newLine = 0
   let oldName = null
   const flush = () => {
-    if (file?.path) files.set(file.path, file)
+    if (file?.path) files.set(file.path, files.has(file.path) ? mergeSections(files.get(file.path), file) : file)
     file = hunk = oldName = null
   }
 
@@ -84,6 +119,7 @@ export function parseDiff(diffText) {
         oldPath: null,
         status: 'modified',
         binary: false,
+        replaced: false,
         additions: 0,
         deletions: 0,
         hunks: [],
@@ -140,6 +176,7 @@ export function numberedDiff(records) {
       file.status === 'added' && 'new file',
       file.status === 'deleted' && 'deleted',
       file.status === 'renamed' && `renamed from ${file.oldPath}`,
+      file.replaced && 'replaced',
       file.binary && 'binary',
     ].filter(Boolean)
     out.push(`\n### ${file.path} (+${file.additions} -${file.deletions})${marks.map(m => ` [${m}]`).join('')}`)
@@ -289,6 +326,7 @@ export function runDiff({ cwd, base, pr, out, jobBase }) {
       status: file.status,
       untracked: source.untracked.has(file.path),
       binary: file.binary,
+      ...(file.replaced ? { replaced: true } : {}),
       additions: file.additions,
       deletions: file.deletions,
       generated: isGeneratedPath(file.path),
@@ -299,6 +337,11 @@ export function runDiff({ cwd, base, pr, out, jobBase }) {
   })
   for (const file of source.oversized) {
     const owner = packageOf(file)
+    const existing = records.find(r => r.path === file)
+    if (existing) {
+      existing.note = 'recreated as an untracked file over 1 MB, which is not diffed'
+      continue
+    }
     records.push({
       path: file,
       status: 'added',
@@ -314,7 +357,8 @@ export function runDiff({ cwd, base, pr, out, jobBase }) {
     })
   }
   const files = records.map(({ hunks, ...rest }) => rest)
-  const rules = applicableRules(top, records.map(r => r.path))
+  // A move out of a directory is judged by that directory's rules too, so both ends of a rename count.
+  const rules = applicableRules(top, records.flatMap(r => (r.oldPath ? [r.path, r.oldPath] : [r.path])))
 
   const paths = {
     patch: path.join(outDir, 'diff.patch'),

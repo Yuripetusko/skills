@@ -222,8 +222,9 @@ It writes four files to `--out` (default `<job dir>/diff/`, or a temp dir withou
   Generated and lock files get no hunks there.
 - `files.json` has one entry per changed file: path, status, generated flag and owning package (the
   nearest `package.json`).
-- `rules.json` lists the root `AGENTS.md` and every `AGENTS.md` between a changed file and the root,
-  with byte sizes and an `over24kb` flag, because agy truncates a rules file at 24,000 bytes.
+- `rules.json` lists the root `AGENTS.md` and every `AGENTS.md` between a changed file and the root
+  (for a rename, between both its old and new path and the root), with byte sizes and an `over24kb`
+  flag, because agy truncates a rules file at 24,000 bytes.
 
 The base is `--base` (its merge-base with `HEAD`). Without it, a `--job` diff starts from the commit
 the job started on, and anything else from the merge-base with `origin/main`, then `main`, then
