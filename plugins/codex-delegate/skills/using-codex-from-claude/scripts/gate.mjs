@@ -515,8 +515,10 @@ export async function gateCheck({ jobDir, round }) {
   const renames = Object.fromEntries(changes.filter(c => c.status === 'R').map(c => [c.from, c.file]))
   const common = { changed: changes, renames, outsideScope, unowned, durationMs: snap.durationMs }
   if (!snap.complete) {
-    const errors = snap.commands.filter(c => c.error).map(c => `${c.id}: ${c.error}`)
-    return finish(EXIT.error, 'error', { complete: false, errors, ...common, added: [], removed: [], countsByRule: {} })
+    const failed = snap.commands.filter(c => c.error)
+    const errors = failed.map(c => `${c.id}: ${c.error}`)
+    const stderr = Object.fromEntries(failed.filter(c => c.stderrTail).map(c => [c.id, c.stderrTail]))
+    return finish(EXIT.error, 'error', { complete: false, errors, stderr, ...common, added: [], removed: [], countsByRule: {} })
   }
   const d = delta(baseline.findings, snap.findings, renames)
   const failed = d.added.length || outsideScope.length
@@ -559,6 +561,7 @@ export function formatCheck(r) {
   for (const o of r.outsideScope ?? []) lines.push(`  outside baseline scope: ${o.file} (${o.reason})`)
   const removed = Object.entries(r.countsByRule ?? {}).filter(([, c]) => c.removed)
   if (removed.length) lines.push(`Removed: ${removed.map(([rule, c]) => `${rule} ${c.removed}`).join(', ')}`)
+  for (const [id, text] of Object.entries(r.stderr ?? {})) lines.push(`stderr of ${id}:`, text.replace(/^/gm, '  '))
   lines.push(`Details: ${r.file}`)
   return lines.join('\n')
 }

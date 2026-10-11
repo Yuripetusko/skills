@@ -286,6 +286,8 @@ describe('jobs.mjs gate', () => {
     const r = run(['gate', 'check', '--job', job])
     assert.equal(r.status, 2, r.stdout + r.stderr)
     assert.match(r.stdout, /^GATE ERROR: could not run .*lint:packages\/b: exited 101/)
+    const d = JSON.parse(fs.readFileSync(path.join(job, 'gate', 'delta-9.json'), 'utf8'))
+    assert.deepEqual([d.verdict, d.complete, d.exitCode], ['error', false, 2])
     fs.rmSync(path.join(state, 'lint-packages_b.status'))
     const r2 = run(['gate', 'check', '--job', job])
     assert.equal(r2.status, 2)

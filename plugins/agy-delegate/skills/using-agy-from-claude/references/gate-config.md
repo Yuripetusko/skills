@@ -27,7 +27,8 @@ delegate-jobs gate check --job <job> [--round <n>]
 | 3    | `GATE: not configured`    | No config file and no `--gate-config`                                |
 
 After the first line, `check` lists each added finding as `+ <rule>  <file>:<line>:<col>  <message>`,
-then each file outside the scope, the removed counts by rule, and the path of the delta file.
+then each file outside the scope, the removed counts by rule, the stderr of any command that failed,
+and the path of the delta file.
 
 ## The config file
 
@@ -131,7 +132,7 @@ A baseline that could not run makes every later `check` exit 2.
 | ---------------- | ----- |
 | `baseline.json`  | Repo root, config path and content, `head`, the snapshot `tree`, `scope` (`whole`, `reason`, `paths`, `seeds`, `units`), the command list (`plan`), per-command results, `findings` and `countsByRule` |
 | `after-<n>.json` | The check snapshot: per-command results, `findings`, `countsByRule` |
-| `delta-<n>.json` | `verdict` (`ok`, `failed`, `error`, `not configured`), `exitCode`, `complete`, `added`, `removed`, `countsByRule` (added and removed per rule), `outsideScope`, `unowned`, `changed`, `renames`, `errors` |
+| `delta-<n>.json` | `verdict` (`ok`, `failed`, `error`, `not configured`), `exitCode`, `complete`, `added`, `removed`, `countsByRule` (added and removed per rule), `outsideScope`, `unowned`, `changed`, `renames`, and on an error `errors` plus `stderr` by command |
 
 Each command result records `id`, `argv`, `cwd`, `status`, `signal`, `durationMs`, `stderrTail`,
 `error` and the number of findings, so a slow or broken gate shows up in the job dir.
