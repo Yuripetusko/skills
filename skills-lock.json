@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "skills": {
+    "deslop": {
+      "source": "yuripetusko/skills",
+      "sourceType": "github",
+      "skillPath": "skills/deslop/SKILL.md",
+      "computedHash": "c344cb99029135a6975174a599c39a007d0e9c08ac54ef2eff217c3632ef30cb"
+    },
+    "implement-next-ticket": {
+      "source": "yuripetusko/skills",
+      "sourceType": "github",
+      "skillPath": "skills/implement-next-ticket/SKILL.md",
+      "computedHash": "f6c3c8077d698bd42c1c50161d2840b2ee6387dbfa92feb496b2f2d2eaca51dc"
+    },
+    "orchestrate-implementation-team": {
+      "source": "yuripetusko/skills",
+      "sourceType": "github",
+      "skillPath": "skills/orchestrate-implementation-team/SKILL.md",
+      "computedHash": "24fb6473b05c5dfb405b0e4e44aa5bdd2af052a7bf00d517cd0741daf34c33bb"
+    },
+    "to-adr": {
+      "source": "yuripetusko/skills",
+      "sourceType": "github",
+      "skillPath": "skills/to-adr/SKILL.md",
+      "computedHash": "3ffc70115a620e60f4defcb2fc237f1b6bfc481876695ab88f63783be153c2e1"
+    },
+    "to-implementation-plan": {
+      "source": "yuripetusko/skills",
+      "sourceType": "github",
+      "skillPath": "skills/to-implementation-plan/SKILL.md",
+      "computedHash": "70fe11a0ca1fc3e16a08b7470c37ea0473dfa2f7684c1006d1cba6e1865d6629"
+    }
+  }
+}
