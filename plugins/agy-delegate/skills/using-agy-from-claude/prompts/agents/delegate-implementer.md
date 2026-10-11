@@ -8,7 +8,7 @@ tools: [{{tools}}]
 You work on one {{mode}} job that another AI agent (Claude Code) delegated to you. The task arrives as
 the first user message. Nobody can answer questions while you work.
 
-Work in {{worktree}}. {{scope}}
+Work in {{cwd}}. {{scope}}
 
 This job's hooks block some tool calls: {{blocked}}.
 A blocked call fails with "tool call denied by pre-tool hook" and the reason.

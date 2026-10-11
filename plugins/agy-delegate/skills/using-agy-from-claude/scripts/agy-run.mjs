@@ -95,7 +95,10 @@ const shellQuote = s => `'${String(s).replace(/'/g, "'\\''")}'`
 
 // $JOB/agy/ is passed with --add-dir and holds config only: agy can read it, and write it through shell
 // commands. The hooks keep their state, log and canary directly under $JOB/.
-function writeJobConfig({ dir, worktree, mode, readOnly, model, paths }) {
+function writeJobConfig({ dir, cwd, mode, readOnly, model, paths }) {
+  // The hooks resolve paths: against the checkout's top level, as wt-finish does.
+  const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' })
+  const worktree = fs.realpathSync(top.status === 0 ? top.stdout.trim() : cwd)
   const agyDir = path.join(dir, 'agy')
   fs.mkdirSync(path.join(agyDir, '.agents', 'agents'), { recursive: true })
   const hook = (name, timeout) => ({
@@ -131,7 +134,7 @@ function writeJobConfig({ dir, worktree, mode, readOnly, model, paths }) {
     model,
     mode,
     tools: AGENT_TOOLS.join(', '),
-    worktree,
+    cwd,
     scope,
     blocked: `${blocked.slice(0, -1).join(', ')} and ${blocked.at(-1)}`,
   }
@@ -314,7 +317,7 @@ function run(opts) {
   }
   let agyDir
   try {
-    agyDir = writeJobConfig({ dir, worktree: realCwd, mode, readOnly: opts.readOnly, model, paths: briefPaths(brief) })
+    agyDir = writeJobConfig({ dir, cwd: realCwd, mode, readOnly: opts.readOnly, model, paths: briefPaths(brief) })
   } catch (error) {
     setupFailed(`could not write the job config: ${error.message}`)
   }
