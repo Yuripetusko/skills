@@ -1,0 +1,3 @@
+thread 'main' panicked at crates/linter/src/service.rs:118:9:
+failed to build the type-aware program
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace

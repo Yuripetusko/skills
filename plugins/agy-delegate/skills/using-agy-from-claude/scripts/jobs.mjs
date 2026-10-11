@@ -20,7 +20,7 @@ const ROOT = process.env.DELEGATE_JOBS_DIR || path.join(os.homedir(), '.claude',
 const KEEP_JOBS = 50
 const KEEP_DAYS = 7
 const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }
-const SIBLINGS = ['diff.mjs']
+const SIBLINGS = ['diff.mjs', 'gate.mjs']
 
 const USAGE = `Usage: node jobs.mjs <command>
   new <tool> [--label <text>]          create a job dir under ${ROOT}, print its path
@@ -32,6 +32,8 @@ const USAGE = `Usage: node jobs.mjs <command>
   wt-setup [--base <ref>] [--install [full|deps]] [--allow-main]
   wt-finish --paths '<path|glob> ...' | --path <p> [--path <p>…] [--message <msg>] [--job <job>]
   diff [--job <job>] [--base <ref>] [--pr <n>] [--json] [--out <dir>]  numbered diff, changed files, applicable AGENTS.md
+  gate baseline --job <job> [--gate-config <path>] [--paths '<globs>'] | gate check --job <job> [--round <n>]
+                                       lint and type-check findings added since the baseline
 <job> is a job dir, its name, or a unique prefix of the name.`
 
 const git = (args, opts = {}) =>
@@ -510,6 +512,14 @@ async function cmdDiff(args) {
   }
 }
 
+// The logic is in gate.mjs, one of SIBLINGS. A crash exits 2 (could not run), never 1 (findings added).
+async function cmdGate(args) {
+  const mod = await import('./gate.mjs').catch(e =>
+    fail(e.code === 'ERR_MODULE_NOT_FOUND' ? "gate.mjs is missing next to this jobs.mjs, probably an old copy. Use the plugin's delegate-jobs, or start any delegate job to refresh the copy" : e.message, 2),
+  )
+  await mod.cmdGate(args).catch(e => fail(`GATE ERROR: ${e.stack ?? e.message}`, 2))
+}
+
 const commands = {
   new: cmdNew,
   exec: cmdExec,
@@ -520,6 +530,7 @@ const commands = {
   'wt-setup': cmdWtSetup,
   'wt-finish': cmdWtFinish,
   diff: cmdDiff,
+  gate: cmdGate,
 }
 if (path.basename(process.argv[1] ?? '') === 'jobs.mjs') {
   const [cmd, ...args] = process.argv.slice(2)
