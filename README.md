@@ -60,9 +60,11 @@ For the orchestrating session itself, start the Monitor tool on
 minutes and then the job's outcome, which keeps the orchestrator's context small. Drop `--every` to
 get every step.
 
-`jobs.mjs` is shared by both plugins, with an identical copy in each; check them with
-`cmp plugins/agy-delegate/skills/using-agy-from-claude/scripts/jobs.mjs plugins/codex-delegate/skills/using-codex-from-claude/scripts/jobs.mjs`.
-Each new job refreshes the copy at `~/.claude/delegate-jobs/jobs.mjs`.
+`jobs.mjs` and `diff.mjs` are shared by both plugins, with an identical copy in each; check them with
+`cmp plugins/agy-delegate/skills/using-agy-from-claude/scripts/jobs.mjs plugins/codex-delegate/skills/using-codex-from-claude/scripts/jobs.mjs`
+(and the same for `diff.mjs`). Each new job refreshes the copies in `~/.claude/delegate-jobs/`.
+`delegate-jobs diff --job <job>` writes a numbered diff, the changed files and the applicable
+`AGENTS.md` files for a job's change; `--pr <n>` does the same for a GitHub PR.
 
 **Install.** Add the marketplace from this checkout, then install both plugins:
 
