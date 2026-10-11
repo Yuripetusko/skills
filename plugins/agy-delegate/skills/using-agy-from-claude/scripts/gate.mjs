@@ -473,6 +473,8 @@ export async function gateBaseline({ jobDir, root, configPath, paths }) {
     return { exitCode: EXIT.error, verdict: 'error', error: e.message, file }
   }
   const snap = await snapshot({ root, commands, env: config.env, phase: 'baseline' })
+  // Taken again after the run, so files the gate commands themselves write never count as changes.
+  tree = snapshotTree(root, gateDir(jobDir))
   const result = { ...base, configured: true, head, tree, scope, gateConfig: config, plan: commands, ...snap }
   write(file, result)
   return { exitCode: snap.complete ? EXIT.ok : EXIT.error, verdict: snap.complete ? 'baseline' : 'error', file, result }
@@ -597,6 +599,16 @@ export async function cmdGate(args) {
       process.exit(128 + ({ SIGHUP: 1, SIGINT: 2, SIGTERM: 15 })[sig])
     })
   const job = jobOrExit2(opt('--job'))
+  try {
+    await runGate(sub, opt, job)
+  } catch (e) {
+    console.log(`GATE ERROR: the gate crashed: ${e.message}`)
+    process.stderr.write(`${e.stack}\n`)
+    process.exit(EXIT.error)
+  }
+}
+
+async function runGate(sub, opt, job) {
   let r
   if (sub === 'baseline') {
     const top = job.toplevel ?? job.cwd ?? process.cwd()

@@ -28,7 +28,8 @@ delegate-jobs gate check --job <job> [--round <n>]
 
 After the first line, `check` lists each added finding as `+ <rule>  <file>:<line>:<col>  <message>`,
 then each file outside the scope, the removed counts by rule, the stderr of any command that failed,
-and the path of the delta file.
+and the path of the delta file. A stale copy of `jobs.mjs` without `gate.mjs` next to it exits 2 with
+nothing on stdout, so check the exit code first.
 
 ## The config file
 

@@ -98,6 +98,8 @@ const [tool, unit] = process.argv.slice(2)
 const state = process.env.FAKE_GATE_STATE
 const name = tool === 'lint' ? 'lint-' + unit.replaceAll('/', '_') : tool
 const read = f => (fs.existsSync(path.join(state, f)) ? fs.readFileSync(path.join(state, f), 'utf8') : null)
+const touch = read(name + '.touch')
+if (touch) fs.writeFileSync(path.join(process.env.FAKE_GATE_ROOT, touch), 'export {}')
 if (read(name + '.hang') !== null) setInterval(() => {}, 1000)
 else {
   process.stdout.write((read(name + '.out') ?? read(tool + '-default.out') ?? '').replaceAll('<ROOT>', process.env.FAKE_GATE_ROOT))
@@ -303,6 +305,17 @@ describe('jobs.mjs gate', () => {
     assert.match(r.stdout, /tsc could not check a project/)
     stage('typecheck.out', fixture('tsc-before.txt'))
     stage('typecheck.status', '2')
+  })
+
+  test('files the gate commands write belong to the baseline, not to the change', () => {
+    const j = newJob('packages/b/**')
+    stage('typecheck.touch', 'apps/docs/generated.d.ts')
+    const b = run(['gate', 'baseline', '--job', j, '--gate-config', configFile])
+    assert.equal(b.status, 0, b.stdout + b.stderr)
+    const c = run(['gate', 'check', '--job', j])
+    assert.equal(c.status, 0, c.stdout + c.stderr)
+    fs.rmSync(path.join(state, 'typecheck.touch'))
+    fs.rmSync(path.join(repo, 'apps/docs/generated.d.ts'))
   })
 
   test('a command that runs past its timeout is killed and exits 2', () => {
