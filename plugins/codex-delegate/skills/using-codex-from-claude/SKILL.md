@@ -96,7 +96,7 @@ spaces, and an entry that contains spaces goes in double quotes.
 2. Make sure a configured gate has its dependencies. When the checkout has `.agents/delegate-gate.json`
    and no `node_modules`, run `node "$JOBS" wt-setup --install deps` in the foreground with
    `timeout: 600000`, whatever the brief says about `install:`. Stop on a failure, as in step 1.
-3. Append the rules: `cat "$SKILL/prompts/implementer.md" >> "<dir>/brief.md"`.
+3. Append the rules after a blank line: `{ echo; cat "$SKILL/prompts/implementer.md"; } >> "<dir>/brief.md"`.
 4. Take the gate baseline, after steps 1 to 3 and before the launch, in the foreground with
    `timeout: 600000`:
 
@@ -119,11 +119,13 @@ spaces, and an entry that contains spaces goes in double quotes.
    ```
 
    It compares the worktree with the baseline and records the verdict in the job's `meta.json`, which
-   `node "$JOBS" jobs` shows as `gate OK|FAILED|error|not configured`. Its exit code is a verdict, not
+   `node "$JOBS" jobs` shows as `gate OK|FAILED|error|not configured`. While it runs the record says
+   `pending`. Its exit code is a verdict, not
    a failure of yours: 0 `GATE OK`, 1 `GATE FAILED`, 2 `GATE ERROR`, 3 `GATE: not configured`.
    Do not retry, do not ask Codex to fix findings, and do not revert anything. If the call hits the
    Bash timeout, report `GATE ERROR: the check timed out` and tell the caller to run
-   `delegate-jobs gate check --job <dir>` themselves. The baseline stays in the job dir.
+   `delegate-jobs gate check --job <dir>` themselves. The baseline stays in the job dir, and `jobs`
+   shows `gate error` or `gate pending` for the interrupted check, never the `OK` of an earlier one.
 7. Then run `node "$JOBS" wt-finish --job "<dir>" --paths '<the paths: value as written>'`, adding `--message "<commit>"` when
    the brief has `commit:`. A failed gate does not stop it: the brief's `commit:` decides whether to
    commit, and the caller decides what happens next. Codex's sandbox cannot write a worktree's git
@@ -299,8 +301,9 @@ delegate-jobs gate check --job <job> [--round <n>]
 
 After the first line, `check` lists each added finding as `+ <rule>  <file>:<line>:<col>  <message>`,
 the files outside the baseline scope, and the removed counts by rule. The verdict also goes into the
-job's `meta.json` as `gate: {verdict, added, removed, round}`, and `delegate-jobs jobs` shows it as
-`gate OK|FAILED|error|not configured` after the scope verdict. A stale `jobs.mjs` copy without
+job's `meta.json` as `gate: {verdict, added, removed, outside, round}`, and `delegate-jobs jobs` shows
+the verdict as `gate pending|OK|FAILED|error|not configured` after the scope verdict. `outside` counts
+the files outside the baseline scope. `references/gate-config.md` describes the record. A stale `jobs.mjs` copy without
 `gate.mjs` beside it exits 2 with nothing on stdout, so read the exit code first.
 
 Cost, measured on a 12-package pnpm monorepo with oxlint and `tsc -b`: one package takes 75 to 125 s

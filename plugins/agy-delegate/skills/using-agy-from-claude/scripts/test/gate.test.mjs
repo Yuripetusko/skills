@@ -1,12 +1,12 @@
 // Tests for gate.mjs: parsers and delta on recorded output, and the CLI on a temp repo with a fake tool.
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { after, before, describe, test } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { delta, listUnits, parseOxlintJson, parseTsc, resolveScope } from '../gate.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
@@ -256,7 +256,7 @@ describe('jobs.mjs gate', () => {
     assert.match(r.stdout, /^GATE OK: 0 added, 0 removed · round 1/)
     assert.ok(fs.existsSync(path.join(job, 'gate', 'after-1.json')))
     assert.ok(fs.existsSync(path.join(job, 'gate', 'delta-1.json')))
-    assert.deepEqual(metaGate(job), { verdict: 'OK', added: 0, removed: 0, round: 1 })
+    assert.deepEqual(metaGate(job), { verdict: 'OK', added: 0, removed: 0, outside: 0, round: 1 })
   })
 
   test('snapshots leave git status, refs, stash and the real index alone', () => {
@@ -277,7 +277,7 @@ describe('jobs.mjs gate', () => {
     const d = JSON.parse(fs.readFileSync(path.join(job, 'gate', 'delta-2.json'), 'utf8'))
     assert.deepEqual(d.renames, { 'packages/a/src/old-name.ts': 'packages/a/src/new-name.ts' })
     assert.equal(d.exitCode, 1)
-    assert.deepEqual(metaGate(job), { verdict: 'FAILED', added: 3, removed: 2, round: 2 })
+    assert.deepEqual(metaGate(job), { verdict: 'FAILED', added: 3, removed: 2, outside: 0, round: 2 })
     // The snapshot of the edited tree exists only as unreachable objects, which git gc prunes.
     assert.equal(gitSnapshot().refs, gitState.refs)
     assert.match(git(['fsck', '--unreachable', '--no-reflogs']), /unreachable tree/)
@@ -298,6 +298,8 @@ describe('jobs.mjs gate', () => {
     assert.match(r.stdout, /outside baseline scope: lib\/util\.ts \(outside every unit and not in ignore\)/)
     const d = JSON.parse(fs.readFileSync(path.join(job, 'gate', 'delta-7.json'), 'utf8'))
     assert.deepEqual(d.ignored, ['README.md'])
+    // A failure caused only by files outside the scope is told apart by `outside`.
+    assert.deepEqual(metaGate(job), { verdict: 'FAILED', added: 0, removed: 0, outside: 2, round: 7 })
     reset()
   })
 
@@ -421,7 +423,7 @@ describe('jobs.mjs gate', () => {
     const c = run(['gate', 'check', '--job', j])
     assert.equal(c.status, 3)
     assert.match(c.stdout, /^GATE: not configured/)
-    assert.deepEqual(metaGate(j), { verdict: 'not configured', added: 0, removed: 0, round: 1 })
+    assert.deepEqual(metaGate(j), { verdict: 'not configured', added: 0, removed: 0, outside: 0, round: 1 })
     const fresh = newJob('packages/a/**')
     const none = run(['gate', 'check', '--job', fresh])
     assert.equal(none.status, 2)
@@ -446,5 +448,112 @@ describe('jobs.mjs gate', () => {
     assert.equal(gate.rounds, 3)
     assert.match(run(['jobs']).stdout, new RegExp(`${path.basename(job)} .*scope OK {2}gate OK `))
     assert.match(run(['jobs', '--json']).stdout, /"verdict": "OK"/)
+  })
+
+  // A check writes `pending` first, so one that dies cannot leave the OK of an earlier round standing.
+  const startCheck = (j, extra = []) => {
+    const child = spawn(process.execPath, [JOBS, 'gate', 'check', '--job', j, ...extra], { cwd: repo, env: env(), stdio: 'ignore' })
+    const exited = new Promise(resolve => child.on('exit', (code, signal) => resolve({ code, signal })))
+    return { child, exited }
+  }
+  const until = async fn => {
+    for (let i = 0; i < 200; i++) {
+      if (fn()) return
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    assert.fail('timed out waiting for the check')
+  }
+  const pendingJob = () => {
+    const j = newJob('apps/docs/**')
+    assert.equal(run(['gate', 'baseline', '--job', j, '--gate-config', configFile]).status, 0)
+    assert.equal(run(['gate', 'check', '--job', j]).status, 0)
+    assert.equal(metaGate(j).verdict, 'OK')
+    stage('lint-apps_docs.hang', '')
+    return j
+  }
+  const hungTool = () => spawnSync('pkill', ['-f', path.join(tmp, 'fake-tool.mjs')])
+
+  test('a running check is pending, and a signal turns it into error, not the old OK', async () => {
+    const j = pendingJob()
+    const { child, exited } = startCheck(j)
+    await until(() => metaGate(j).verdict === 'pending')
+    assert.deepEqual(metaGate(j), { verdict: 'pending', added: 0, removed: 0, outside: 0, round: 2 })
+    assert.match(run(['jobs']).stdout, new RegExp(`${path.basename(j)} .*gate pending`))
+    child.kill('SIGTERM')
+    assert.deepEqual(await exited, { code: 143, signal: null })
+    assert.deepEqual(metaGate(j), { verdict: 'error', added: 0, removed: 0, outside: 0, round: 2 })
+    fs.rmSync(path.join(state, 'lint-apps_docs.hang'))
+  })
+
+  test('a check that is killed outright stays pending', async () => {
+    const j = pendingJob()
+    const { child, exited } = startCheck(j)
+    await until(() => metaGate(j).verdict === 'pending')
+    child.kill('SIGKILL')
+    assert.equal((await exited).signal, 'SIGKILL')
+    hungTool()
+    assert.equal(metaGate(j).verdict, 'pending')
+    assert.equal(metaGate(j).round, 2)
+    fs.rmSync(path.join(state, 'lint-apps_docs.hang'))
+  })
+
+  test('a check that throws records error', () => {
+    const j = newJob('apps/docs/**')
+    assert.equal(run(['gate', 'baseline', '--job', j, '--gate-config', configFile]).status, 0)
+    const file = path.join(j, 'gate', 'baseline.json')
+    const baseline = JSON.parse(fs.readFileSync(file, 'utf8'))
+    delete baseline.gateConfig
+    fs.writeFileSync(file, JSON.stringify(baseline))
+    const r = run(['gate', 'check', '--job', j])
+    assert.equal(r.status, 2, r.stdout + r.stderr)
+    assert.match(r.stdout, /^GATE ERROR: the gate crashed/)
+    assert.equal(metaGate(j).verdict, 'error')
+  })
+
+  // Writers that overlap must not drop each other's fields (exec, wt-finish, the check, the stop gate).
+  const writerScript = () => {
+    const file = path.join(tmp, 'meta-writer.mjs')
+    fs.writeFileSync(
+      file,
+      `import { updateMeta } from ${JSON.stringify(pathToFileURL(JOBS).href)}
+const [dir, id, count] = process.argv.slice(2)
+for (let i = 0; i < Number(count); i++) {
+  updateMeta(dir, { ['w' + id + '_' + i]: i })
+  updateMeta(dir, meta => ({ counter: (meta.counter ?? 0) + 1 }))
+}
+`,
+    )
+    return file
+  }
+  const runWriter = (dir, id, count) =>
+    new Promise(resolve => {
+      const child = spawn(process.execPath, [writerScript(), dir, String(id), String(count)], { env: env(), stdio: 'ignore' })
+      child.on('exit', code => resolve(code))
+    })
+
+  test('overlapping meta writers keep every field', async () => {
+    const dir = path.join(jobsDir, 'writers-test')
+    fs.mkdirSync(dir)
+    fs.writeFileSync(path.join(dir, 'meta.json'), JSON.stringify({ id: 'writers-test' }))
+    const codes = await Promise.all([1, 2, 3, 4, 5, 6].map(id => runWriter(dir, id, 25)))
+    assert.deepEqual(codes, [0, 0, 0, 0, 0, 0])
+    const meta = JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8'))
+    assert.equal(meta.counter, 150)
+    assert.equal(Object.keys(meta).filter(k => /^w\d+_\d+$/.test(k)).length, 150)
+    assert.deepEqual(fs.readdirSync(dir).sort(), ['meta.json'])
+    assert.deepEqual(fs.readdirSync(path.join(jobsDir, '.locks')).filter(n => n.startsWith('meta-')), [])
+  })
+
+  test('a check that overlaps other meta writers keeps their fields and records its verdict', async () => {
+    const j = newJob('packages/a/src/**')
+    assert.equal(run(['gate', 'baseline', '--job', j, '--gate-config', configFile]).status, 0)
+    const writers = Promise.all([1, 2].map(id => runWriter(j, id, 40)))
+    const { exited } = startCheck(j)
+    assert.deepEqual(await exited, { code: 0, signal: null })
+    assert.deepEqual(await writers, [0, 0])
+    const meta = JSON.parse(fs.readFileSync(path.join(j, 'meta.json'), 'utf8'))
+    assert.equal(meta.counter, 80)
+    assert.equal(meta.gate.verdict, 'OK')
+    assert.equal(meta.w2_39, 39)
   })
 })

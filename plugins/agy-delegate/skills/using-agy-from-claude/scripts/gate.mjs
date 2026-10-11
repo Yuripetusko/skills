@@ -4,7 +4,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
-import { globToRegExp, readMeta, resolveJob, updateMeta } from './jobs.mjs'
+import { globToRegExp, resolveJob, updateMeta } from './jobs.mjs'
 
 export const EXIT = { ok: 0, failed: 1, error: 2, unconfigured: 3 }
 const CONFIG_NAME = path.join('.agents', 'delegate-gate.json')
@@ -488,23 +488,55 @@ export async function gateBaseline({ jobDir, root, configPath, paths }) {
 }
 
 // The verdict goes into the job's meta.json for `jobs` and for the stop gate, which adds its own
-// fields (`rounds`) to the same record. Fields written by others stay, and only these four are set.
-const VERDICTS = { ok: 'OK', failed: 'FAILED', error: 'error', 'not configured': 'not configured' }
-function recordVerdict(jobDir, { verdict, round, added, removed }) {
+// fields (`rounds`) to the same record. A check writes `pending` before it starts and its outcome when
+// it ends, so a check that dies leaves `pending` or `error`, never an earlier `OK`. Fields written by
+// others stay, and only these five are set.
+const VERDICTS = { pending: 'pending', ok: 'OK', failed: 'FAILED', error: 'error', 'not configured': 'not configured' }
+function recordVerdict(jobDir, { verdict, round, added = 0, removed = 0, outside = 0 }) {
   if (!fs.existsSync(path.join(jobDir, 'meta.json'))) return
-  const gate = { ...(readMeta(jobDir).gate ?? {}), verdict: VERDICTS[verdict] ?? verdict, added, removed, round }
-  updateMeta(jobDir, { gate })
+  const next = { verdict: VERDICTS[verdict] ?? verdict, added, removed, outside, round }
+  updateMeta(jobDir, meta => ({ gate: { ...(meta.gate ?? {}), ...next } }))
+}
+
+// The check that is running, for the signal handler in cmdGate.
+let pending = null
+export function abortPending() {
+  if (!pending) return
+  const { jobDir, round } = pending
+  pending = null
+  try {
+    recordVerdict(jobDir, { verdict: 'error', round })
+  } catch {}
 }
 
 export async function gateCheck({ jobDir, round }) {
+  const rounds = fs.existsSync(gateDir(jobDir)) ? fs.readdirSync(gateDir(jobDir)).map(f => Number(/^delta-(\d+)\.json$/.exec(f)?.[1] ?? 0)) : []
+  const n = round ?? 1 + Math.max(0, ...rounds)
+  recordVerdict(jobDir, { verdict: 'pending', round: n })
+  pending = { jobDir, round: n }
+  try {
+    return await runCheck({ jobDir, n })
+  } catch (e) {
+    abortPending()
+    throw e
+  } finally {
+    pending = null
+  }
+}
+
+async function runCheck({ jobDir, n }) {
   const dir = gateDir(jobDir)
   const baseline = tryJson(path.join(dir, 'baseline.json'))
-  const rounds = fs.existsSync(dir) ? fs.readdirSync(dir).map(f => Number(/^delta-(\d+)\.json$/.exec(f)?.[1] ?? 0)) : []
-  const n = round ?? 1 + Math.max(0, ...rounds)
   const deltaFile = path.join(dir, `delta-${n}.json`)
   const finish = (exitCode, verdict, data) => {
     write(deltaFile, { round: n, verdict, exitCode, createdAt: new Date().toISOString(), ...data })
-    recordVerdict(jobDir, { verdict, round: n, added: data.added?.length ?? 0, removed: data.removed?.length ?? 0 })
+    recordVerdict(jobDir, {
+      verdict,
+      round: n,
+      added: data.added?.length ?? 0,
+      removed: data.removed?.length ?? 0,
+      outside: data.outsideScope?.length ?? 0,
+    })
     return { exitCode, verdict, file: deltaFile, round: n, ...data }
   }
   if (!baseline) return finish(EXIT.error, 'error', { complete: false, errors: [`no baseline at ${dir}/baseline.json`] })
@@ -618,6 +650,7 @@ export async function cmdGate(args) {
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'])
     process.on(sig, () => {
       killActive()
+      abortPending()
       process.exit(128 + ({ SIGHUP: 1, SIGINT: 2, SIGTERM: 15 })[sig])
     })
   const job = jobOrExit2(opt('--job'))
