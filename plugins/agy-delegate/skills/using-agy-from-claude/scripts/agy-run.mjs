@@ -39,15 +39,23 @@ const readEvents = file =>
 
 // agy narrates while it waits on a background command ("I am waiting for the type-check to complete")
 // and those lines can lead its final answer. out.md drops them; events.jsonl keeps the raw text.
+// Each template is a status sentence seen in the field. A line that fits none of them stays.
+const CHECK = String.raw`(?:type-?check|lint(?:er)?|checks?|task|command|tests?)`
 const WAITING = [
-  /^(?=(?:I|We|Waiting|Awaiting|Still)\b).*\b(?:wait|waits|waiting|await|awaits|awaiting)\b.*\b(?:complet\w*|finish\w*|done)[.!?]?$/i,
-  /^[^.!?]{0,100}\b(?:is|are) (?:still )?running(?: (?:in the background|across [^.!?]{0,60}|on [^.!?]{0,60}))?[.!?]?$/i,
+  // "I am waiting for the lint check on a package to finish." / "Waiting for task to complete."
+  new RegExp(String.raw`^(?:I am waiting|I'm waiting|Waiting) for [^.!?]{0,100}?\b${CHECK}\b[^.!?]{0,60}? to (?:complete|finish)\.$`, 'i'),
+  // "I have started the lint check and will wait for it to complete."
+  /^I have (?:launched|started|run) [^.!?]{1,120}? and (?:will wait|am waiting) for (?:it|them|the command|the check) to (?:complete|finish)\.$/i,
+  // "The type-check command is running in the background." / "Baseline lint check is running across packages."
+  /^(?:(?:the|this) )?(?:(?:baseline|total|target|full) )*(?:type-?check|lint(?:er)?)(?: (?:check|command|task))? is running (?:in the background|across [^.!?]{0,60})\.$/i,
+  // "I will await its completion." / "I will wait for it to complete."
+  /^I will (?:await its completion|wait for it to (?:complete|finish))\.$/i,
 ]
 const isWaitingLine = line =>
   line
     .trim()
     .split(/(?<=[.!?])\s+/)
-    .every(s => s.length <= 200 && WAITING.some(re => re.test(s)))
+    .every(s => WAITING.some(re => re.test(s)))
 // Only leading lines go, up to the first line that is not a waiting line. An answer that is nothing
 // but waiting lines stays as it is.
 function dropWaitingLines(text) {

@@ -51,7 +51,7 @@ function events(response) {
 }
 
 // Runs the fake agy through `jobs.mjs exec`, the way a relay does, and returns the job's files.
-function replay(response) {
+function replay(response, mode = 'task') {
   const work = path.join(scratch, `work-${counter++}`)
   fs.mkdirSync(work)
   const eventsFile = path.join(work, 'fixture-events.jsonl')
@@ -59,9 +59,10 @@ function replay(response) {
   const run = (...args) => spawnSync(process.execPath, args, { cwd: work, env: { ...env, FAKE_AGY_EVENTS: eventsFile }, encoding: 'utf8' })
   const dir = run(JOBS, 'new', 'agy', '--label', 'replay').stdout.trim()
   fs.writeFileSync(path.join(dir, 'brief.md'), 'Review the change.\n')
-  const r = run(JOBS, 'exec', dir, '--', process.execPath, AGY_RUN, 'run', '--job-dir', dir, '--mode', 'task')
+  const r = run(JOBS, 'exec', dir, '--', process.execPath, AGY_RUN, 'run', '--job-dir', dir, '--mode', mode)
   const read = name => fs.readFileSync(path.join(dir, name), 'utf8')
-  return { exit: r.status, out: read('out.md'), err: read('err.log'), events: read('events.jsonl') }
+  const prompt = JSON.parse(read('input.jsonl')).message.content
+  return { exit: r.status, out: read('out.md'), err: read('err.log'), events: read('events.jsonl'), prompt }
 }
 
 const ANSWER = '## Agent Execution Summary\n\n- What was done: reviewed the change.\n- Files changed: none.'
@@ -89,7 +90,7 @@ describe('waiting lines in out.md', () => {
       'Waiting for task to complete.',
       '',
       'Waiting for the storage type-check to finish.',
-      'Still waiting for the lint run to finish.',
+      'I will wait for it to finish.',
     ]
     const r = replay(`${waiting.join('\n')}\n### Summary of work\n\nFixed 3 findings.`)
     assert.equal(r.out, '### Summary of work\n\nFixed 3 findings.\n')
@@ -108,13 +109,26 @@ describe('waiting lines in out.md', () => {
     assert.doesNotMatch(r.err, /dropped/)
   })
 
-  test('result lines that mention waiting or running are kept', () => {
-    const lines = [
+  test('a real first line stays when waiting words or "running" appear in it', () => {
+    const firstLines = [
       'The build is running and has failed with 3 errors.',
       'I waited for the check to complete and found 3 errors.',
       'I am waiting for the check to complete and will report 3 errors.',
+      'I removed the wait timeout so the task can finish.',
+      'Unauthorized commands are running in the background.',
+      'I am waiting for the maintainers to complete the review.',
+      'I have started the migration and will wait for the DBA to finish.',
+      'Waiting for the approval to finish.',
     ]
-    for (const line of lines) assert.equal(replay(line).out, `${line}\n`, line)
+    for (const line of firstLines) {
+      const answer = `${line}\nTests passed.`
+      assert.equal(replay(answer).out, `${answer}\n`, line)
+    }
+  })
+
+  test('a waiting line goes but the real line after it stays', () => {
+    const r = replay('Waiting for task to complete.\nI removed the wait timeout so the task can finish.\nTests passed.')
+    assert.equal(r.out, 'I removed the wait timeout so the task can finish.\nTests passed.\n')
   })
 
   test('progress narration other than waiting is left alone', () => {
@@ -127,5 +141,23 @@ describe('waiting lines in out.md', () => {
     const r = replay(answer)
     assert.equal(r.exit, 0)
     assert.equal(r.out, `${answer}\n`)
+  })
+})
+
+describe('rules in the assembled prompt', () => {
+  const noAiClis = 'Do not run other AI CLIs (claude, codex, gemini, agy)'
+
+  test('task mode, the read-only review case, gets the preamble rules and no implementer rules', () => {
+    const { prompt } = replay(ANSWER, 'task')
+    assert.ok(prompt.includes(noAiClis), 'task prompt lacks the no-other-AI-CLIs rule')
+    assert.ok(prompt.includes('states results, not progress'))
+    assert.ok(!prompt.includes('Rules for this job'), 'task prompt carries the implementer rules')
+  })
+
+  test('implement mode gets the preamble and the implementer rules', () => {
+    const { prompt } = replay(ANSWER, 'implement')
+    assert.ok(prompt.includes(noAiClis))
+    assert.ok(prompt.includes('Rules for this job'))
+    assert.ok(prompt.includes('Never edit ticket files, MAP.md or SPEC.md'))
   })
 })
