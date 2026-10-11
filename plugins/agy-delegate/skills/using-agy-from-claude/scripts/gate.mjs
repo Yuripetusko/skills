@@ -10,8 +10,11 @@ export const EXIT = { ok: 0, failed: 1, error: 2, unconfigured: 3 }
 const CONFIG_NAME = path.join('.agents', 'delegate-gate.json')
 const PARSERS = { 'oxlint-json': parseOxlintJson, tsc: parseTsc }
 const OK_STATUS = { 'oxlint-json': [0, 1], tsc: [0, 1, 2] }
-// File-less tsc errors that mean a project or option is broken, so nothing was checked.
-const TSC_SETUP_CODES = /^TS(5\d{3}|6053)$/
+// tsc errors that mean a project could not be read or built, so its files went unchecked. Any
+// file-less TS5xxx (a broken option) counts too.
+const TSC_SETUP_CODES = new Set(['TS5057', 'TS5058', 'TS5083', 'TS6053', 'TS6202', 'TS6305', 'TS6306', 'TS6310', 'TS18003'])
+// Changed files outside every unit fail the check unless they match one of these globs.
+export const DEFAULT_IGNORE = ['**/*.md', '**/*.mdx', '**/*.txt', 'LICENSE*', '.github/**', '.vscode/**', '.gitignore', '.gitattributes', '.editorconfig']
 const TOOLS = ['typecheck', 'lint'] // type-check writes dist/ first, so lint sees the same outputs both times
 
 const readJson = file => JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -45,6 +48,9 @@ export function loadConfig(file) {
   }
   for (const link of config.links ?? [])
     if (typeof link.from !== 'string' || !Array.isArray(link.to)) problems.push('each link needs "from" and "to": [...]')
+  for (const key of ['packages', 'extraProjects', 'wholeRepo', 'ignore'])
+    if (config[key] !== undefined && (!Array.isArray(config[key]) || config[key].some(g => typeof g !== 'string')))
+      problems.push(`${key} must be an array of strings`)
   if (problems.length) throw new Error(`${file}: ${problems.join('; ')}`)
   return config
 }
@@ -100,8 +106,7 @@ function expandDirs(root, globs) {
   return [...dirs].filter(d => !exclude.some(re => re.test(d))).sort()
 }
 
-// A unit is a workspace package, or an extra type-check-only project dir. Files outside every unit
-// are ignored by the gate.
+// A unit is a workspace package, or an extra type-check-only project dir.
 export function listUnits(root, config) {
   const units = new Map()
   for (const dir of expandDirs(root, config.packages ?? workspaceGlobs(root))) {
@@ -303,10 +308,11 @@ export function parseTsc(stdout, { root, cwd }) {
   for (const line of stdout.replace(/\r\n?/g, '\n').split('\n')) {
     if (!line.trim()) continue
     let m
-    if ((m = TSC_LINE.exec(line)))
+    if ((m = TSC_LINE.exec(line))) {
+      if (TSC_SETUP_CODES.has(m[5])) throw new Error(`tsc could not check a project: ${line.trim()}`)
       findings.push({ tool: 'typecheck', rule: m[5], file: relFile(root, cwd, m[1]), line: +m[2], column: +m[3], severity: m[4], message: m[6] })
-    else if ((m = TSC_GLOBAL.exec(line))) {
-      if (TSC_SETUP_CODES.test(m[2])) throw new Error(`tsc could not check a project: ${line.trim()}`)
+    } else if ((m = TSC_GLOBAL.exec(line))) {
+      if (TSC_SETUP_CODES.has(m[2]) || /^TS5\d{3}$/.test(m[2])) throw new Error(`tsc could not check a project: ${line.trim()}`)
       findings.push({ tool: 'typecheck', rule: m[2], file: null, line: null, column: null, severity: m[1], message: m[3] })
     } else if (/^\s/.test(line) && findings.length) findings.at(-1).message += `\n${line}`
     else throw new Error(`unparseable tsc output: ${line.slice(0, 200)}`)
@@ -341,7 +347,7 @@ export async function snapshot({ root, commands, env, phase }) {
     if (!rec.error) {
       try {
         rec.findings = PARSERS[cmd.parser](r.stdout, { root, cwd: cmd.cwd })
-        if (cmd.parser === 'tsc' && r.status !== 0 && !rec.findings.length) rec.error = `exited ${r.status} without diagnostics`
+        if (r.status !== 0 && !rec.findings.length) rec.error = `exited ${r.status} without diagnostics`
       } catch (e) {
         rec.error = e.message
       }
@@ -475,7 +481,8 @@ export async function gateBaseline({ jobDir, root, configPath, paths }) {
   const snap = await snapshot({ root, commands, env: config.env, phase: 'baseline' })
   // Taken again after the run, so files the gate commands themselves write never count as changes.
   tree = snapshotTree(root, gateDir(jobDir))
-  const result = { ...base, configured: true, head, tree, scope, gateConfig: config, plan: commands, ...snap }
+  const owners = [...units.values()].map(u => ({ dir: u.dir, name: u.name, package: u.package }))
+  const result = { ...base, configured: true, head, tree, scope, units: owners, gateConfig: config, plan: commands, ...snap }
   write(file, result)
   return { exitCode: snap.complete ? EXIT.ok : EXIT.error, verdict: snap.complete ? 'baseline' : 'error', file, result }
 }
@@ -500,22 +507,27 @@ export async function gateCheck({ jobDir, round }) {
   } catch (e) {
     return finish(EXIT.error, 'error', { complete: false, errors: [e.message] })
   }
-  const units = new Set(scope.units)
-  const known = listUnits(root, baseline.gateConfig)
+  // Units from both snapshots own files, so a package added or deleted since the baseline still owns
+  // its changes. Only the units the baseline ran on count as covered, in whole-repo mode too.
+  const covered = new Set(scope.units)
+  const owners = new Map([...(baseline.units ?? []).map(u => [u.dir, u]), ...listUnits(root, baseline.gateConfig)])
   const wholeRes = (baseline.gateConfig.wholeRepo ?? []).map(g => globToRegExp(g))
+  const ignoreRes = (baseline.gateConfig.ignore ?? DEFAULT_IGNORE).map(g => globToRegExp(g))
   const outsideScope = []
-  const unowned = []
+  const ignored = []
   for (const file of new Set(changes.flatMap(c => [c.file, c.from].filter(Boolean)))) {
-    if (scope.whole) continue
-    const owner = ownerOf(known, file)
-    if (wholeRes.some(re => re.test(file))) outsideScope.push({ file, reason: 'matches wholeRepo' })
-    else if (!owner) unowned.push(file)
-    else if (!units.has(owner)) outsideScope.push({ file, reason: `${owner} is not in the baseline scope` })
+    const owner = ownerOf(owners, file)
+    if (wholeRes.some(re => re.test(file))) {
+      if (!scope.whole) outsideScope.push({ file, reason: 'matches wholeRepo' })
+    } else if (owner) {
+      if (!covered.has(owner)) outsideScope.push({ file, reason: `${owner} is not in the baseline scope` })
+    } else if (ignoreRes.some(re => re.test(file))) ignored.push(file)
+    else outsideScope.push({ file, reason: 'outside every unit and not in ignore' })
   }
   const snap = await snapshot({ root, commands: baseline.plan, env: baseline.gateConfig.env, phase: 'check' })
   write(path.join(dir, `after-${n}.json`), { round: n, createdAt: new Date().toISOString(), ...snap })
   const renames = Object.fromEntries(changes.filter(c => c.status === 'R').map(c => [c.from, c.file]))
-  const common = { changed: changes, renames, outsideScope, unowned, durationMs: snap.durationMs }
+  const common = { changed: changes, renames, outsideScope, ignored, durationMs: snap.durationMs }
   if (!snap.complete) {
     const failed = snap.commands.filter(c => c.error)
     const errors = failed.map(c => `${c.id}: ${c.error}`)

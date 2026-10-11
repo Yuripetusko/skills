@@ -39,6 +39,7 @@ nothing on stdout, so check the exit code first.
   "extraProjects": ["scripts"],
   "wholeRepo": ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.json"],
   "links": [{ "from": "apps/web", "to": ["apps/storybook"] }],
+  "ignore": ["**/*.md", ".github/**", ".gitignore"],
   "env": {},
   "lint": {
     "command": ["pnpm", "--silent", "run", "lint", "--format=json", "--report-unused-disable-directives-severity=warn"],
@@ -62,6 +63,7 @@ nothing on stdout, so check the exit code first.
 | `extraProjects`       | `[]`               | Dirs outside the packages that are type-check projects, such as a root `scripts/` with its own `tsconfig.json`. They get no lint command |
 | `wholeRepo`           | `[]`               | Globs for files whose change affects every package: lockfile, root manifest, shared config |
 | `links`               | `[]`               | Dependencies the manifests don't declare. The `to` units compile the `from` unit's sources, so they count as its dependents |
+| `ignore`              | see below          | Globs for changed files outside every unit that no gate command reads. Any other change outside every unit fails the check. Replaces the default list |
 | `env`                 | `{}`               | Extra environment for every command. `NO_COLOR=1` is always set |
 | `lint.command`        | required           | Argument array, run once per unit in scope. `{dir}` becomes the unit's repo-relative dir and `{name}` its package name |
 | `lint.cwd`            | `.`                | Working dir, relative to the repo root; takes `{dir}`. Relative paths in the output resolve against it |
@@ -75,14 +77,17 @@ nothing on stdout, so check the exit code first.
 | `typecheck.timeoutSec`| `900`              | |
 | `notes`               | none               | Ignored |
 
+The default `ignore` list is `**/*.md`, `**/*.mdx`, `**/*.txt`, `LICENSE*`, `.github/**`, `.vscode/**`,
+`.gitignore`, `.gitattributes` and `.editorconfig`.
+
 A config needs `lint`, `typecheck` or both. Commands run without a shell, each in its own process
 group, and a timeout kills the whole group. Type-check runs before lint in both snapshots, because
 `tsc -b` writes the `dist/` output that type-aware lint can read.
 
 ## Scope
 
-1. A changed file belongs to the unit with the longest matching dir. Files outside every unit, such as
-   root docs, have no gate command and are ignored.
+1. A file belongs to the unit with the longest matching dir. Files outside every unit, such as root
+   docs, have no gate command.
 2. Each `paths:` entry matches the way `wt-finish` matches it: a directory covers everything below it,
    anything else is a glob. The units that own matching files are the seeds. So is the unit that owns
    the entry's literal prefix, so a file that doesn't exist yet still counts.
@@ -91,16 +96,24 @@ group, and a timeout kills the whole group. Type-check runs before lint in both 
    results in the packages that import it.
 4. An entry that matches `wholeRepo`, or no `paths:` at all, makes the scope the whole repo.
 
-`check` then sorts every file changed since the baseline:
+`check` then sorts every file changed since the baseline. Units from both the baseline and the current
+tree own files, so a package added or deleted since the baseline still owns its changes.
 
-- In a scope unit: compared as usual.
-- Matching `wholeRepo`, or in a unit outside the scope: reported as outside the baseline scope, exit 1.
-  The baseline never ran there, so every existing finding would look new.
-- Outside every unit: listed as `unowned` in the delta file and ignored.
+- In a unit the baseline ran on: compared as usual.
+- In any other unit, including one added since the baseline: outside the baseline scope, exit 1. This
+  holds in whole-repo mode too, because the baseline's command list never covered the new unit.
+- Matching `wholeRepo`: outside the baseline scope, unless the baseline was whole-repo.
+- Outside every unit and matching `ignore`: listed as `ignored` in the delta file.
+- Outside every unit and not matching `ignore`: outside the baseline scope.
+
+A change outside the baseline scope fails because the baseline never ran there: no command checks the
+file, or every existing finding there would look new.
 
 The changed files come from git. The baseline records the working tree, untracked files included, as
-a tree object built in a scratch index under `$JOB/gate/`. `check` builds another and diffs the two
-with rename detection. Gitignored files don't count, and the real index is never touched.
+a tree object built in a scratch index under `$JOB/gate/`, after its own commands have run. `check`
+builds another and diffs the two with rename detection. Gitignored files don't count. The real index,
+the refs and the stash are never touched, so the status of the checkout doesn't change. The trees and
+blobs land in the repo's object store as unreachable objects, which garbage collection prunes.
 
 ## Delta
 
@@ -120,10 +133,13 @@ The snapshot fails, and `baseline` or `check` exits 2, when any command:
 
 - could not start, timed out, or was killed by a signal;
 - exited with a status its parser doesn't expect: oxlint 0 or 1, tsc 0, 1 or 2;
+- exited non-zero with no diagnostics to explain it;
 - printed output that doesn't parse. For lint that is anything but JSON with a `diagnostics` array.
   For tsc it is any line that is neither a diagnostic nor an indented continuation;
-- for tsc, exited non-zero with no diagnostics, or printed a file-less `TS5xxx` or `TS6053` error.
-  Those mean a project or option is broken and nothing was checked.
+- for tsc, printed an error that means a project could not be read or built, with or without a file
+  location: `TS5057`, `TS5058`, `TS5083`, `TS6053`, `TS6202`, `TS6305`, `TS6306`, `TS6310`, `TS18003`,
+  or any file-less `TS5xxx`. The files of that project went unchecked, and the same error in both
+  snapshots would otherwise cancel out.
 
 A baseline that could not run makes every later `check` exit 2.
 
@@ -131,9 +147,9 @@ A baseline that could not run makes every later `check` exit 2.
 
 | File             | Holds |
 | ---------------- | ----- |
-| `baseline.json`  | Repo root, config path and content, `head`, the snapshot `tree`, `scope` (`whole`, `reason`, `paths`, `seeds`, `units`), the command list (`plan`), per-command results, `findings` and `countsByRule` |
+| `baseline.json`  | Repo root, config path and content, `head`, the snapshot `tree`, `scope` (`whole`, `reason`, `paths`, `seeds`, `units`), every unit at baseline time (`units`), the command list (`plan`), per-command results, `findings` and `countsByRule` |
 | `after-<n>.json` | The check snapshot: per-command results, `findings`, `countsByRule` |
-| `delta-<n>.json` | `verdict` (`ok`, `failed`, `error`, `not configured`), `exitCode`, `complete`, `added`, `removed`, `countsByRule` (added and removed per rule), `outsideScope`, `unowned`, `changed`, `renames`, and on an error `errors` plus `stderr` by command |
+| `delta-<n>.json` | `verdict` (`ok`, `failed`, `error`, `not configured`), `exitCode`, `complete`, `added`, `removed`, `countsByRule` (added and removed per rule), `outsideScope`, `ignored`, `changed`, `renames`, and on an error `errors` plus `stderr` by command |
 
 Each command result records `id`, `argv`, `cwd`, `status`, `signal`, `durationMs`, `stderrTail`,
 `error` and the number of findings, so a slow or broken gate shows up in the job dir.

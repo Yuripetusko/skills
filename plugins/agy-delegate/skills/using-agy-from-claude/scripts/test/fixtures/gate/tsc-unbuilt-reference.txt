@@ -1,0 +1,1 @@
+packages/b/src/y.ts(1,19): error TS6305: Output file '<ROOT>/packages/a/dist/x.d.ts' has not been built from source file '<ROOT>/packages/a/src/x.ts'.

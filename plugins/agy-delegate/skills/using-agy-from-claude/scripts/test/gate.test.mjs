@@ -1,6 +1,7 @@
 // Tests for gate.mjs: parsers and delta on recorded output, and the CLI on a temp repo with a fake tool.
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -48,6 +49,11 @@ describe('parsers', () => {
     const missing = fixture('tsc-missing-project.txt').replace('<ROOT>', ROOT)
     assert.throws(() => parseTsc(missing, { root: ROOT, cwd: '.' }), /could not check a project/)
     assert.throws(() => parseTsc(fixture('tsc-garbage.txt'), { root: ROOT, cwd: '.' }), /unparseable/)
+  })
+
+  test('tsc: an unreadable or unbuilt project fails the snapshot even with a file location', () => {
+    for (const name of ['tsc-unreadable-config.txt', 'tsc-unbuilt-reference.txt'])
+      assert.throws(() => parseTsc(fixture(name).replaceAll('<ROOT>', ROOT), { root: ROOT, cwd: '.' }), /could not check a project/, name)
   })
 
   test('tsc: the worktree path is stripped from messages', () => {
@@ -175,7 +181,13 @@ describe('scope', () => {
 })
 
 describe('jobs.mjs gate', () => {
-  let tmp, repo, jobsDir, state, configFile, job
+  let tmp, repo, jobsDir, state, configFile, job, gitState
+  const git = args => spawnSync('git', args, { cwd: repo, encoding: 'utf8' }).stdout
+  const gitSnapshot = () => ({
+    index: createHash('sha256').update(fs.readFileSync(path.join(repo, '.git', 'index'))).digest('hex'),
+    refs: git(['for-each-ref', '--format=%(refname) %(objectname)']),
+    stash: git(['stash', 'list']),
+  })
   const env = () => ({ ...process.env, DELEGATE_JOBS_DIR: jobsDir, FAKE_GATE_STATE: state, FAKE_GATE_ROOT: repo })
   const run = (args, script = JOBS) => spawnSync(process.execPath, [script, ...args], { cwd: repo, env: env(), encoding: 'utf8' })
   const stage = (name, text) => fs.writeFileSync(path.join(state, name), text)
@@ -223,6 +235,7 @@ describe('jobs.mjs gate', () => {
     stage('typecheck.out', fixture('tsc-before.txt'))
     stage('typecheck.status', '2')
     job = newJob('packages/a/src/**')
+    gitState = gitSnapshot()
   })
   after(() => fs.rmSync(tmp, { recursive: true, force: true }))
 
@@ -244,6 +257,11 @@ describe('jobs.mjs gate', () => {
     assert.ok(fs.existsSync(path.join(job, 'gate', 'delta-1.json')))
   })
 
+  test('snapshots leave git status, refs, stash and the real index alone', () => {
+    assert.deepEqual(gitSnapshot(), gitState)
+    assert.equal(git(['status', '--porcelain=v1', '--untracked-files=all']), '')
+  })
+
   test('new findings fail with exit 1 and are listed by rule and file', () => {
     edit('packages/a/src/x.ts', 'export const x: any = 1\n')
     fs.renameSync(path.join(repo, 'packages/a/src/old-name.ts'), path.join(repo, 'packages/a/src/new-name.ts'))
@@ -257,6 +275,9 @@ describe('jobs.mjs gate', () => {
     const d = JSON.parse(fs.readFileSync(path.join(job, 'gate', 'delta-2.json'), 'utf8'))
     assert.deepEqual(d.renames, { 'packages/a/src/old-name.ts': 'packages/a/src/new-name.ts' })
     assert.equal(d.exitCode, 1)
+    // The snapshot of the edited tree exists only as unreachable objects, which git gc prunes.
+    assert.equal(gitSnapshot().refs, gitState.refs)
+    assert.match(git(['fsck', '--unreachable', '--no-reflogs']), /unreachable tree/)
   })
 
   test('a changed file outside the baseline scope fails the check', () => {
@@ -265,12 +286,15 @@ describe('jobs.mjs gate', () => {
     reset()
     edit('apps/docs/src/index.ts', 'export const docs = 5\n')
     edit('README.md', '# changed\n')
+    fs.mkdirSync(path.join(repo, 'lib'))
+    edit('lib/util.ts', 'export const util = 1\n')
     const r = run(['gate', 'check', '--job', job, '--round', '7'])
     assert.equal(r.status, 1, r.stdout + r.stderr)
-    assert.match(r.stdout, /^GATE FAILED: 0 added, 0 removed, 1 file\(s\) outside baseline scope · round 7/)
-    assert.match(r.stdout, /outside baseline scope: apps\/docs\/src\/index\.ts/)
+    assert.match(r.stdout, /^GATE FAILED: 0 added, 0 removed, 2 file\(s\) outside baseline scope · round 7/)
+    assert.match(r.stdout, /outside baseline scope: apps\/docs\/src\/index\.ts \(apps\/docs is not in the baseline scope\)/)
+    assert.match(r.stdout, /outside baseline scope: lib\/util\.ts \(outside every unit and not in ignore\)/)
     const d = JSON.parse(fs.readFileSync(path.join(job, 'gate', 'delta-7.json'), 'utf8'))
-    assert.deepEqual(d.unowned, ['README.md'])
+    assert.deepEqual(d.ignored, ['README.md'])
     reset()
   })
 
@@ -305,6 +329,56 @@ describe('jobs.mjs gate', () => {
     assert.match(r.stdout, /tsc could not check a project/)
     stage('typecheck.out', fixture('tsc-before.txt'))
     stage('typecheck.status', '2')
+  })
+
+  test('an unreadable or unbuilt project exits 2, at baseline and at check', () => {
+    stage('typecheck.out', fixture('tsc-unbuilt-reference.txt'))
+    stage('typecheck.status', '1')
+    const j = newJob('packages/a/src/**')
+    const b = run(['gate', 'baseline', '--job', j, '--gate-config', configFile])
+    assert.equal(b.status, 2, b.stdout + b.stderr)
+    assert.match(b.stdout, /typecheck .*tsc could not check a project: .*TS6305/)
+    stage('typecheck.out', fixture('tsc-unreadable-config.txt'))
+    const r = run(['gate', 'check', '--job', job])
+    assert.equal(r.status, 2, r.stdout + r.stderr)
+    assert.match(r.stdout, /tsc could not check a project: .*TS5083/)
+    stage('typecheck.out', fixture('tsc-before.txt'))
+    stage('typecheck.status', '2')
+  })
+
+  test('a lint command that exits non-zero with no diagnostics exits 2', () => {
+    stage('lint-packages_b.out', fixture('lint-empty.json'))
+    stage('lint-packages_b.status', '1')
+    const r = run(['gate', 'check', '--job', job])
+    assert.equal(r.status, 2, r.stdout + r.stderr)
+    assert.match(r.stdout, /lint:packages\/b: exited 1 without diagnostics/)
+    fs.rmSync(path.join(state, 'lint-packages_b.out'))
+    fs.rmSync(path.join(state, 'lint-packages_b.status'))
+  })
+
+  test('a package deleted since the baseline still owns its files', () => {
+    fs.rmSync(path.join(repo, 'apps/docs'), { recursive: true })
+    const r = run(['gate', 'check', '--job', job])
+    assert.equal(r.status, 1, r.stdout + r.stderr)
+    assert.match(r.stdout, /outside baseline scope: apps\/docs\/package\.json \(apps\/docs is not in the baseline scope\)/)
+    reset()
+  })
+
+  test('in whole-repo mode a package added after the baseline is outside the scope', () => {
+    writeConfig({ typecheck: undefined })
+    const j = newJob('packages/a/**')
+    fs.writeFileSync(path.join(j, 'brief.md'), 'Do the thing.\n')
+    const b = run(['gate', 'baseline', '--job', j, '--gate-config', configFile])
+    assert.equal(b.status, 0, b.stdout + b.stderr)
+    assert.match(b.stdout, /scope whole repo \(no paths given\)/)
+    fs.mkdirSync(path.join(repo, 'packages/c/src'), { recursive: true })
+    edit('packages/c/package.json', JSON.stringify({ name: '@x/c', scripts: { lint: 'oxlint' } }))
+    edit('packages/c/src/z.ts', 'export const z: any = 1\n')
+    const r = run(['gate', 'check', '--job', j])
+    assert.equal(r.status, 1, r.stdout + r.stderr)
+    assert.match(r.stdout, /outside baseline scope: packages\/c\/src\/z\.ts \(packages\/c is not in the baseline scope\)/)
+    reset()
+    writeConfig()
   })
 
   test('files the gate commands write belong to the baseline, not to the change', () => {

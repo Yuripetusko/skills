@@ -1,0 +1,1 @@
+packages/a/tsconfig.json(2,14): error TS5083: Cannot read file '<ROOT>/packages/shared/base.json'.
