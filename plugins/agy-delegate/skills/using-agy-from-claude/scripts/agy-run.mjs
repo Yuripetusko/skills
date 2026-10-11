@@ -6,11 +6,12 @@
 // Behaviour this relies on was measured on agy 1.3.3; see SKILL.md, "Measured on agy 1.3.3".
 
 import { spawn, spawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CANARY, readHookLog, STATE } from './hooks/job.mjs'
+import { CANARY, readHookLog, STATE, stateHash } from './hooks/job.mjs'
 import { updateMeta } from './jobs.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -37,8 +38,11 @@ const die = (code, msg) => {
   process.exit(code)
 }
 const read = file => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '')
-const readEvents = file =>
-  read(file)
+const size = file => (fs.existsSync(file) ? fs.statSync(file).size : 0)
+// Reads from byte `from` on, so a rerun in the same job dir ignores the earlier executions' output.
+const readFrom = (file, from = 0) => (fs.existsSync(file) ? fs.readFileSync(file).subarray(from).toString('utf8') : '')
+const readEvents = (file, from = 0) =>
+  readFrom(file, from)
     .split('\n')
     .flatMap(line => {
       try {
@@ -143,25 +147,41 @@ function writeJobConfig({ dir, cwd, mode, readOnly, model, paths }) {
   fs.writeFileSync(path.join(agyDir, '.agents', 'agents', `${AGENT}.md`), agent)
   const state = { job: dir, worktree, mode, readOnly: Boolean(readOnly), paths, agent: AGENT, model, createdAt: new Date().toISOString() }
   fs.writeFileSync(path.join(dir, STATE), `${JSON.stringify(state, null, 2)}\n`)
-  return agyDir
+  return { agyDir, stateSha: stateHash(state) }
 }
+
+const SLASH_TIMEOUT_S = 60
 
 // `/hooks` and `/agents` answer from config without calling a model. Our hooks must be listed from our
 // hooks.json, and the --agent name must be listed: agy runs its default agent for an unknown one.
+// Returns null when both pass, else what failed.
 function checkJobConfig(agy, cwd, agyDir, agent) {
+  // Only a clean exit counts: a call that timed out or crashed may still have printed JSON.
   const slash = command => {
     const r = spawnSync(agy, ['-p', command, '--output-format', 'json', '--add-dir', agyDir, '--agent', agent], {
       cwd,
       encoding: 'utf8',
-      timeout: 60_000,
+      timeout: SLASH_TIMEOUT_S * 1000,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
+    const call = `\`agy -p ${command}\``
+    if (r.error?.code === 'ETIMEDOUT') throw new Error(`${call} timed out after ${SLASH_TIMEOUT_S}s`)
+    if (r.error) throw new Error(`${call} could not run: ${r.error.message}`)
+    if (r.signal) throw new Error(`${call} was killed by ${r.signal}`)
+    if (r.status !== 0) throw new Error(`${call} exited ${r.status}: ${r.stderr.trim().split('\n').at(-1) || 'no detail'}`)
     try {
       return JSON.parse(r.stdout).command?.data ?? null
     } catch {
-      return null
+      throw new Error(`${call} printed no JSON`)
     }
   }
+  try {
+    return checkListings(slash, agyDir, agent)
+  } catch (error) {
+    return error.message
+  }
+}
+function checkListings(slash, agyDir, agent) {
   const real = file => {
     try {
       return fs.realpathSync(file)
@@ -316,8 +336,9 @@ function run(opts) {
     die(EXIT.setup, msg)
   }
   let agyDir
+  let stateSha
   try {
-    agyDir = writeJobConfig({ dir, cwd: realCwd, mode, readOnly: opts.readOnly, model, paths: briefPaths(brief) })
+    ;({ agyDir, stateSha } = writeJobConfig({ dir, cwd: realCwd, mode, readOnly: opts.readOnly, model, paths: briefPaths(brief) }))
   } catch (error) {
     setupFailed(`could not write the job config: ${error.message}`)
   }
@@ -337,6 +358,12 @@ function run(opts) {
   const eventsFile = path.join(dir, 'events.jsonl')
   const agyErr = path.join(dir, 'agy-stderr.log')
   const before = gitStatus(cwd)
+  // This execution's evidence only: a rerun in the same job dir appends to both logs, and an old
+  // canary or hook.log line must not count.
+  const [eventsStart, errStart] = [size(eventsFile), size(agyErr)]
+  const runId = randomUUID()
+  const canary = path.join(dir, CANARY)
+  fs.rmSync(canary, { force: true })
 
   const args = ['-p=', '--input-format', 'stream-json', '--output-format', 'stream-json', '--model', model]
   args.push('--dangerously-skip-permissions', '--print-timeout', `${timeoutS}s`, '--add-dir', agyDir, '--agent', agent)
@@ -344,7 +371,13 @@ function run(opts) {
   const child = spawn(agy, args, {
     cwd,
     detached: true, // own process group, so cancel and timeouts also stop the commands agy started
-    env: { ...process.env, AGY_DELEGATE_JOB: dir, AGY_DELEGATE_ROLE: '' },
+    env: {
+      ...process.env,
+      AGY_DELEGATE_JOB: dir,
+      AGY_DELEGATE_RUN: runId,
+      AGY_DELEGATE_STATE_SHA: stateSha,
+      AGY_DELEGATE_ROLE: '',
+    },
     stdio: [fs.openSync(input, 'r'), fs.openSync(eventsFile, 'a'), fs.openSync(agyErr, 'a')],
   })
   log(`${mode} job started: ${model}, print-timeout ${timeoutS}s, pid ${child.pid}, cwd ${cwd}`)
@@ -365,7 +398,7 @@ function run(opts) {
   for (const sig of Object.keys(SIGNALS)) process.on(sig, () => stop(sig))
   // agy must bind to this checkout. It did on 1.3.3; fail fast if a later version picks another root.
   const checkBinding = () => {
-    const init = readEvents(eventsFile).find(e => e.event === 'init')?.init
+    const init = readEvents(eventsFile, eventsStart).find(e => e.event === 'init')?.init
     if (!init) return false
     let bound = init.cwd
     try {
@@ -377,10 +410,16 @@ function run(opts) {
   const watcher = setInterval(() => checkBinding() && clearInterval(watcher), 1000)
   // PreInvocation writes the canary before the first model call. A finished step without it means the
   // job's hooks are not running, so nothing is enforced.
-  const canary = path.join(dir, CANARY)
+  const loadedNow = () => {
+    try {
+      return JSON.parse(fs.readFileSync(canary, 'utf8')).run === runId
+    } catch {
+      return false
+    }
+  }
   const checkCanary = () => {
-    if (fs.existsSync(canary)) return true
-    const stepDone = readEvents(eventsFile).some(
+    if (loadedNow()) return true
+    const stepDone = readEvents(eventsFile, eventsStart).some(
       e => ['tool', 'agent_response'].includes(e.step_update?.step_type) && e.step_update.state === 'DONE',
     )
     if (stepDone) stop('setup')
@@ -397,9 +436,10 @@ function run(opts) {
     clearInterval(tracker)
     const stopped = await reap(tracked, child.pid)
     checkBinding()
-    const events = readEvents(eventsFile)
+    const events = readEvents(eventsFile, eventsStart)
     const result = events.findLast(e => e.event === 'result')?.result
-    const errText = read(agyErr)
+    const errText = readFrom(agyErr, errStart)
+    const loaded = loadedNow()
     const said = events
       .map(e => e.step_update)
       .filter(s => s?.step_type === 'agent_response')
@@ -412,7 +452,7 @@ function run(opts) {
     else if (stopReason === 'setup')
       [exit, why] = [EXIT.setup, `job rules did not load: agy finished a step with no canary ($JOB/${CANARY}) and was stopped`]
     else if (stopReason === 'guard') [exit, why] = [EXIT.timeout, `agy outlived --print-timeout by ${GUARD_S}s and was killed`]
-    else if (!fs.existsSync(canary)) {
+    else if (!loaded) {
       const detail = `${result?.error ?? ''}\n${errText}`.trim().split('\n')[0]
       ;[exit, why] = [EXIT.setup, `job rules did not load: no canary ($JOB/${CANARY}) after the run${detail ? `; agy said: ${detail}` : ''}`]
     } else if (/print timeout after .*partial output/.test(errText))
@@ -427,8 +467,7 @@ function run(opts) {
 
     const answer = result?.response?.trim() ? result.response : said
     if (answer.trim()) process.stdout.write(answer.endsWith('\n') ? answer : `${answer}\n`)
-    const denies = readHookLog(dir).filter(e => e.hook === 'PreToolUse' && e.decision === 'deny')
-    const loaded = fs.existsSync(canary)
+    const denies = readHookLog(dir).filter(e => e.run === runId && e.hook === 'PreToolUse' && e.decision === 'deny')
     report({ cwd, dir, model, exit, why, result, events, before, readOnly: opts.readOnly, stopped, denies, loaded })
     updateMeta(dir, { verdict: why, blocked: denies.length })
     process.exit(exit)

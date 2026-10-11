@@ -31,7 +31,9 @@ into the checkout or into agy's global config. The agent has no subagent, browse
 hooks block these calls:
 
 - In every job: git commands that change repository state (commit, push, reset, checkout, stash,
-  merge and the like) and other AI CLIs (`claude`, `codex`, `gemini`, `agy`, `coderabbit`).
+  merge and the like), other AI CLIs (`claude`, `codex`, `gemini`, `agy`, `coderabbit`), and shell
+  commands that name the job dir. If the job's `state.json` changes during the run, every call is
+  blocked.
 - In implement jobs: `gh` commands that write to GitHub, dependency installs and changes, and file
   writes outside the worktree, outside `paths:`, or to ticket files, `MAP.md` and `SPEC.md`.
 - In read-only jobs: every file write.

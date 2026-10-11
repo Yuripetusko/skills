@@ -1,6 +1,9 @@
 // Shared by agy-run.mjs and the agy hook scripts. Hooks find their job through AGY_DELEGATE_JOB, never
 // through workspacePaths or their cwd: the --add-dir config dir comes first in one and is the other.
+// The runner also sets AGY_DELEGATE_RUN (one id per execution) and AGY_DELEGATE_STATE_SHA. agy's shell
+// commands can write the job dir but cannot change the environment agy starts hooks with.
 
+import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -19,8 +22,17 @@ export function jobDir() {
 
 export const readState = dir => JSON.parse(fs.readFileSync(path.join(dir, STATE), 'utf8'))
 
+// Covers only the fields the deny rules read, so later hooks may add their own fields to state.json.
+export const stateHash = s =>
+  createHash('sha256')
+    .update(JSON.stringify([s.job, s.worktree, s.mode, Boolean(s.readOnly), s.paths ?? []]))
+    .digest('hex')
+
 export const logLine = (dir, entry) =>
-  fs.appendFileSync(path.join(dir, HOOK_LOG), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`)
+  fs.appendFileSync(
+    path.join(dir, HOOK_LOG),
+    `${JSON.stringify({ at: new Date().toISOString(), run: process.env.AGY_DELEGATE_RUN, ...entry })}\n`,
+  )
 
 export function readHookLog(dir) {
   const file = path.join(dir, HOOK_LOG)

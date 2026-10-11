@@ -6,7 +6,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { isVerifier, jobDir, logLine, readState, readStdin } from './job.mjs'
+import { isVerifier, jobDir, logLine, readState, readStdin, stateHash } from './job.mjs'
 
 // A copy of globToRegExp in jobs.mjs, which wt-finish uses, so the hook never depends on that module
 // loading. hooks.test.mjs checks the two agree.
@@ -270,6 +270,8 @@ export const WRITE_RULES = [
   },
 ]
 
+const JOB_FILES = { id: 'job-files', why: "the job's own files and settings are off limits to shell commands" }
+const STATE_CHANGED = { id: 'state-changed', why: "the job's state.json changed during the run, so no rule can be trusted" }
 const NO_TARGET = { id: 'no-target', why: 'the write names no target path to check' }
 const UNRESOLVED = { id: 'unresolved-target', why: 'the target path could not be resolved (a symlink loop or an unreadable directory)' }
 const blocked = (rule, target) => ({
@@ -279,11 +281,23 @@ const blocked = (rule, target) => ({
   reason: `Blocked by job rules (${rule.id}): ${rule.why}. Do not try another way; name it in your final report.`,
 })
 
+// The job dir holds state.json, hook.log and the canary, which the runner trusts.
+function mentionsJob(line, state) {
+  if (/AGY_DELEGATE_/.test(line)) return true
+  if (!state.job) return false
+  const forms = new Set([state.job])
+  try {
+    forms.add(fs.realpathSync(state.job))
+  } catch {}
+  return [...forms].some(dir => line.includes(dir))
+}
+
 // Returns {decision, rule?, reason?, target} for one tool call under the job's state.
 export function decide(call, state) {
   const args = call?.args ?? {}
   if (call?.name === 'run_command') {
     const line = String(args.CommandLine ?? '')
+    if (mentionsJob(line, state)) return blocked(JOB_FILES, line)
     const rules = COMMAND_RULES.filter(r => r.modes.includes(state.mode))
     for (const words of commandsIn(line)) {
       const rule = rules.find(r => r.test(words))
@@ -319,7 +333,9 @@ async function main() {
     call = JSON.parse(raw).toolCall
     if (isVerifier()) return console.log(JSON.stringify({ decision: 'allow' }))
     const dir = jobDir()
-    const d = decide(call, readState(dir))
+    const state = readState(dir)
+    // A changed state.json could widen paths:, so every call is denied, reads included.
+    const d = stateHash(state) === process.env.AGY_DELEGATE_STATE_SHA ? decide(call, state) : blocked(STATE_CHANGED, '')
     const target = d.target.length > 300 ? `${d.target.slice(0, 297)}...` : d.target
     logLine(dir, { hook: 'PreToolUse', decision: d.decision, rule: d.rule, tool: call?.name, target, ...(target ? {} : { keys: Object.keys(call?.args ?? {}) }) })
     console.log(JSON.stringify(d.decision === 'deny' ? { decision: 'deny', reason: d.reason } : { decision: 'allow' }))

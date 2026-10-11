@@ -1,4 +1,4 @@
-// Replays hook stdin JSON through the agy hook scripts. Run: node --test scripts/test/
+// Replays hook stdin JSON through the agy hook scripts. Run: node --test 'scripts/test/*.test.mjs'
 // The fixtures follow agy 1.3.3's documented PreToolUse input; {{worktree}} and {{agyDir}} are filled in here.
 
 import assert from 'node:assert/strict'
@@ -8,6 +8,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { stateHash } from '../hooks/job.mjs'
 import { decide, globToRegExp } from '../hooks/pre-tool.mjs'
 import { globToRegExp as jobsGlob } from '../jobs.mjs'
 
@@ -23,7 +24,7 @@ function makeJob(state = {}) {
   fs.mkdirSync(path.join(job, 'agy', '.agents'), { recursive: true })
   const full = { job, worktree, mode: 'implement', readOnly: false, paths: ['src/**'], agent: 'delegate-implementer', ...state }
   fs.writeFileSync(path.join(job, 'state.json'), JSON.stringify(full))
-  return { root, worktree, job, agyDir: path.join(job, 'agy') }
+  return { root, worktree, job, agyDir: path.join(job, 'agy'), sha: stateHash(full) }
 }
 
 const hookLog = job =>
@@ -36,7 +37,14 @@ function runHook(script, input, ctx, env = {}) {
     input,
     encoding: 'utf8',
     cwd: path.join(ctx.agyDir, '.agents'), // agy runs hooks in the dir that holds hooks.json
-    env: { ...process.env, AGY_DELEGATE_JOB: ctx.job, AGY_DELEGATE_ROLE: '', ...env },
+    env: {
+      ...process.env,
+      AGY_DELEGATE_JOB: ctx.job,
+      AGY_DELEGATE_RUN: 'run-1',
+      AGY_DELEGATE_STATE_SHA: ctx.sha,
+      AGY_DELEGATE_ROLE: '',
+      ...env,
+    },
   })
   assert.equal(r.status, 0, r.stderr)
   return JSON.parse(r.stdout)
@@ -119,7 +127,7 @@ test('verifier role: allow and log nothing', () => {
   assert.deepEqual(hookLog(ctx.job), [])
 })
 
-test('pre-invocation writes the canary once; the verifier role writes none', () => {
+test('pre-invocation writes the canary once per execution; the verifier role writes none', () => {
   const ctx = makeJob()
   const input = JSON.stringify({ conversationId: 'c1', modelName: 'gemini-3.8-flash-low', invocationNum: 0 })
   assert.deepEqual(runHook('pre-invocation.mjs', input, ctx, { AGY_DELEGATE_ROLE: 'verifier' }), {})
@@ -127,9 +135,37 @@ test('pre-invocation writes the canary once; the verifier role writes none', () 
   assert.deepEqual(runHook('pre-invocation.mjs', input, ctx), {})
   const first = fs.readFileSync(path.join(ctx.job, 'loaded'), 'utf8')
   assert.equal(JSON.parse(first).agent, 'delegate-implementer')
+  assert.equal(JSON.parse(first).run, 'run-1')
   runHook('pre-invocation.mjs', input, ctx)
   assert.equal(fs.readFileSync(path.join(ctx.job, 'loaded'), 'utf8'), first)
-  assert.deepEqual(hookLog(ctx.job).map(e => e.decision), ['loaded'])
+  runHook('pre-invocation.mjs', input, ctx, { AGY_DELEGATE_RUN: 'run-2' })
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ctx.job, 'loaded'), 'utf8')).run, 'run-2')
+  assert.deepEqual(hookLog(ctx.job).map(e => [e.decision, e.run]), [['loaded', 'run-1'], ['loaded', 'run-2']])
+})
+
+test('a state.json that no longer matches the runner hash denies every call, reads included', () => {
+  const ctx = makeJob()
+  const file = path.join(ctx.job, 'state.json')
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), paths: ['**'] }))
+  for (const fixture of ['view-file.json', 'run-command-allowed.json', 'write-out-of-scope.json'])
+    assert.match(replay(fixture, ctx).reason, /state-changed/, fixture)
+  assert.match(replay('view-file.json', makeJob(), { AGY_DELEGATE_STATE_SHA: '' }).reason, /state-changed/)
+})
+
+test('a later hook may add its own fields to state.json', () => {
+  const ctx = makeJob()
+  const file = path.join(ctx.job, 'state.json')
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), round: 2 }))
+  assert.deepEqual(replay('write-in-scope.json', ctx), { decision: 'allow' })
+})
+
+test('commands that name the job dir or the AGY_DELEGATE_ variables are denied', () => {
+  const ctx = makeJob()
+  const state = { mode: 'task', worktree: ctx.worktree, paths: [], job: ctx.job }
+  const run = line => decide({ name: 'run_command', args: { CommandLine: line } }, state)
+  for (const line of [`echo '{}' > ${ctx.job}/loaded`, `cat ${ctx.job}/state.json`, 'echo $AGY_DELEGATE_JOB', 'env | grep AGY_DELEGATE_RUN'])
+    assert.equal(run(line).rule, 'job-files', line)
+  assert.equal(run('ls src').decision, 'allow')
 })
 
 const command = (line, state) => decide({ name: 'run_command', args: { CommandLine: line } }, state)
