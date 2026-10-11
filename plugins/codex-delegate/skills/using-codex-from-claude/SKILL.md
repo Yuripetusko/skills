@@ -105,7 +105,7 @@ spaces, and an entry that contains spaces goes in double quotes.
    ```
 
    It records the lint and type-check findings of the untouched worktree in `<dir>/gate/`. Expect
-   2 to 5 minutes on a large monorepo (the "Quality gate" section has the measured times). Exit 0
+   1 to 5 minutes on a large monorepo (the "Quality gate" section has the measured times). Exit 0
    means the baseline is recorded. Exit 3 means the repo has no gate config: go on, the reply will
    say so. Exit 2 means the gate could not run (no dependencies, a project that does not build, a
    broken command): do not launch Codex, and reply with the output. A gate that cannot run would
@@ -303,10 +303,12 @@ job's `meta.json` as `gate: {verdict, added, removed, round}`, and `delegate-job
 `gate OK|FAILED|error|not configured` after the scope verdict. A stale `jobs.mjs` copy without
 `gate.mjs` beside it exits 2 with nothing on stdout, so read the exit code first.
 
-Cost, measured on a pnpm monorepo with oxlint and `tsc -b`: a baseline and a check each take about
-2 minutes for one package, 2.5 minutes for the 12-package scope, and up to 5 minutes for the first
-whole-repo run in a fresh worktree with cold caches. Both calls run in the foreground, which Claude
-Code caps at 10 minutes.
+Cost, measured on a 12-package pnpm monorepo with oxlint and `tsc -b`: one package takes 75 to 125 s
+for a baseline and about 75 s for a check. The 12-package scope takes about 150 s for either. The
+first forced whole-repo type-check in a fresh worktree took 314 s with cold caches. All of that fits
+in the 10 minute cap on a foreground Bash call. A repo whose gate gets near the cap needs the gate as
+its own background step, in a job dir of its own: `exec` overwrites `out.md`, so it must not run on
+the Codex job's dir.
 
 ## Where things live
 
