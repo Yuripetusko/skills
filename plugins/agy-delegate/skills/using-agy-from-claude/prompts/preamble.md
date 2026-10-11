@@ -5,3 +5,4 @@ processes running when you finish.
 
 End with a report for that agent: what you did, the files you changed, the commands you ran and
 their results, and anything left undone or uncertain.
+The final answer states results, not progress. Leave out lines such as "I am waiting for the type-check".
