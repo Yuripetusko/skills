@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Runs one Google Antigravity (agy) job headless for a Claude subagent and classifies the outcome.
 // stdout gets agy's final answer verbatim; stderr and <job>/report.md get the runner's report: exit
-// reason, files agy wrote (from its tool calls), commands it ran, and git status after the run.
+// reason, files agy wrote (from its tool calls), commands it ran, calls the job's hooks blocked, and git
+// status after the run. agy runs as the per-job agent in $JOB/agy/, whose hooks enforce the job rules.
 // Behaviour this relies on was measured on agy 1.3.3; see SKILL.md, "Measured on agy 1.3.3".
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -9,6 +10,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CANARY, readHookLog, STATE } from './hooks/job.mjs'
 import { updateMeta } from './jobs.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -16,7 +18,16 @@ const DEFAULT_MODEL = 'gemini-3.8-flash-high'
 const DEFAULT_TIMEOUT = '30m'
 const MAX_TIMEOUT_S = 110 * 60 // the relay's background Bash call dies at 2 h
 const GUARD_S = 120 // wall clock past --print-timeout before the runner kills agy itself
-const EXIT = { ok: 0, usage: 1, failed: 2, empty: 3, quota: 10, auth: 11, timeout: 12, missing: 13, model: 14, denied: 15 }
+const EXIT = { ok: 0, usage: 1, failed: 2, empty: 3, quota: 10, auth: 11, timeout: 12, missing: 13, model: 14, denied: 15, setup: 18 }
+// The job's main agent. AGY_DELEGATE_AGENT overrides the --agent name only, for testing the setup checks.
+const AGENT = 'delegate-implementer'
+// Names from agy 1.3.3's init event. Left out: subagent, browser, MCP, image and permission tools.
+const AGENT_TOOLS = [
+  'view_file', 'list_dir', 'find_by_name', 'grep_search',
+  'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'sed_file',
+  'run_command', 'command_status', 'send_command_input', 'manage_task', 'schedule', 'wait',
+  'search_web', 'read_url_content',
+]
 const LABEL = Object.fromEntries(Object.entries(EXIT).map(([k, v]) => [v, k]))
 const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }
 
@@ -68,6 +79,101 @@ function preflight(agy, model) {
   const models = r.stdout.split('\n').map(l => l.split('\t')[0].trim()).filter(l => /^[\w.-]+$/.test(l))
   if (model && !models.includes(model)) die(EXIT.model, `model "${model}" is not in \`agy models\`: ${models.join(', ')}`)
   return models
+}
+
+// The brief's `paths:` header, split like wt-finish's --paths.
+function briefPaths(brief) {
+  for (const line of brief.split('\n')) {
+    const m = /^([a-z]+):\s*(.*)$/.exec(line.trim())
+    if (!m) break
+    if (m[1] === 'paths') return [...m[2].matchAll(/"([^"]*)"|'([^']*)'|([^\s,]+)/g)].map(x => x[1] ?? x[2] ?? x[3]).filter(Boolean)
+  }
+  return []
+}
+
+const shellQuote = s => `'${String(s).replace(/'/g, "'\\''")}'`
+
+// $JOB/agy/ is passed with --add-dir and holds config only: agy can read it, and write it through shell
+// commands. The hooks keep their state, log and canary directly under $JOB/.
+function writeJobConfig({ dir, worktree, mode, readOnly, model, paths }) {
+  const agyDir = path.join(dir, 'agy')
+  fs.mkdirSync(path.join(agyDir, '.agents', 'agents'), { recursive: true })
+  const hook = (name, timeout) => ({
+    type: 'command',
+    command: `${shellQuote(process.execPath)} ${shellQuote(path.join(SKILL_DIR, 'scripts', 'hooks', `${name}.mjs`))}`,
+    timeout,
+  })
+  const hooks = {
+    'agy-delegate-job': {
+      PreToolUse: [{ matcher: '', hooks: [hook('pre-tool', 30)] }],
+      PreInvocation: [hook('pre-invocation', 30)],
+    },
+  }
+  fs.writeFileSync(path.join(agyDir, '.agents', 'hooks.json'), `${JSON.stringify(hooks, null, 2)}\n`)
+
+  const implement = mode === 'implement'
+  const scope = readOnly
+    ? 'This job is read-only: every file write is blocked.'
+    : implement && paths.length
+      ? `Change only these paths: ${paths.map(p => `\`${p}\``).join(' ')}. Ticket files (\`*-ticket.md\`), MAP.md and SPEC.md stay unchanged even when listed.`
+      : implement
+        ? 'Change only the files the task names.'
+        : ''
+  const blocked = [
+    'git commands that change repository state',
+    'other AI CLIs',
+    ...(implement ? ['`gh` commands that write to GitHub', 'dependency changes'] : []),
+    ...(implement ? [paths.length ? 'file writes outside the paths above' : 'file writes outside the worktree'] : []),
+    ...(readOnly ? ['file writes'] : []),
+  ]
+  const vars = {
+    job: path.basename(dir),
+    model,
+    mode,
+    tools: AGENT_TOOLS.join(', '),
+    worktree,
+    scope,
+    blocked: `${blocked.slice(0, -1).join(', ')} and ${blocked.at(-1)}`,
+  }
+  const template = read(path.join(SKILL_DIR, 'prompts', 'agents', `${AGENT}.md`))
+  const agent = template.replace(/\{\{(\w+)\}\}/g, (m, key) => vars[key] ?? m).replace(/ +\n/g, '\n')
+  fs.writeFileSync(path.join(agyDir, '.agents', 'agents', `${AGENT}.md`), agent)
+  const state = { job: dir, worktree, mode, readOnly: Boolean(readOnly), paths, agent: AGENT, model, createdAt: new Date().toISOString() }
+  fs.writeFileSync(path.join(dir, STATE), `${JSON.stringify(state, null, 2)}\n`)
+  return agyDir
+}
+
+// `/hooks` and `/agents` answer from config without calling a model. Our hooks must be listed from our
+// hooks.json, and the --agent name must be listed: agy runs its default agent for an unknown one.
+function checkJobConfig(agy, cwd, agyDir, agent) {
+  const slash = command => {
+    const r = spawnSync(agy, ['-p', command, '--output-format', 'json', '--add-dir', agyDir, '--agent', agent], {
+      cwd,
+      encoding: 'utf8',
+      timeout: 60_000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    try {
+      return JSON.parse(r.stdout).command?.data ?? null
+    } catch {
+      return null
+    }
+  }
+  const real = file => {
+    try {
+      return fs.realpathSync(file)
+    } catch {
+      return file
+    }
+  }
+  const ours = real(path.join(agyDir, '.agents', 'hooks.json'))
+  const listed = (slash('/hooks')?.hooks ?? []).filter(h => h.enabled !== false && real(h.source ?? '') === ours)
+  const events = new Set(listed.flatMap(h => (h.actions ?? []).map(a => a.event)))
+  const missing = ['PreToolUse', 'PreInvocation'].filter(e => !events.has(e))
+  if (missing.length) return `\`agy -p /hooks\` does not list this job's ${missing.join(' and ')} hook from ${ours}`
+  const agents = slash('/agents')?.agents ?? []
+  if (!agents.includes(agent)) return `\`agy -p /agents\` does not list agent "${agent}" (it lists: ${agents.join(', ') || 'none'})`
+  return null
 }
 
 function seconds(text) {
@@ -141,7 +247,7 @@ async function reap(tracked, agyPid) {
   return first.map(t => t.command)
 }
 
-function report({ cwd, dir, model, exit, why, result, events, before, readOnly, stopped }) {
+function report({ cwd, dir, model, exit, why, result, events, before, readOnly, stopped, denies, loaded }) {
   // Count a tool call when it starts: a backgrounded command never reaches DONE.
   const byStep = new Map()
   for (const s of events.map(e => e.step_update)) if (s?.step_type === 'tool') byStep.set(s.step_index, s)
@@ -153,6 +259,8 @@ function report({ cwd, dir, model, exit, why, result, events, before, readOnly, 
     inside.length ? spawnSync('git', ['check-ignore', ...inside], { cwd, encoding: 'utf8' }).stdout.split('\n') : [],
   )
   const commands = tools.filter(t => t.tool_name === 'run_command').map(t => t.tool_info?.parameters?.CommandLine)
+  const blockedTargets = new Set(denies.map(d => (d.tool === 'run_command' ? d.target : rel(d.target ?? ''))))
+  const mark = item => (blockedTargets.has(item) ? '   (blocked)' : '')
   const after = gitStatus(cwd)
   const changed = after ? [...after].filter(([f, code]) => before?.get(f) !== code) : []
   const preDirty = after ? [...after].filter(([f, code]) => before?.get(f) === code).length : 0
@@ -162,18 +270,25 @@ function report({ cwd, dir, model, exit, why, result, events, before, readOnly, 
     `- model ${model} · ${Math.round(result?.duration_seconds ?? 0)}s · conversation ${result?.conversation_id || '-'}`,
     `- files agy wrote with its edit tools${writes.length ? ':' : ': none'}`,
     ...writes.map(w => {
-      const flag = !inside.includes(w) ? '   ⚠ outside the checkout' : ignored.has(w) ? '   ⚠ gitignored' : ''
+      const flag = mark(w) || (!inside.includes(w) ? '   ⚠ outside the checkout' : ignored.has(w) ? '   ⚠ gitignored' : '')
       return `  - ${w}${flag}`
     }),
     `- commands agy ran${commands.length ? ' (shell writes do not show up above):' : ': none'}`,
-    ...commands.map(c => `  - \`${String(c).replace(/`/g, "'")}\``),
+    ...commands.map(c => `  - \`${String(c).replace(/`/g, "'")}\`${mark(c)}`),
+    loaded
+      ? `- blocked by job rules${denies.length ? ` (${denies.length}):` : ': none'}`
+      : '- ⚠ job rules did not load (no canary): nothing was blocked or logged',
+    ...denies.map(d => {
+      const target = d.tool === 'run_command' ? `\`${String(d.target ?? '').replace(/`/g, "'")}\`` : d.target ? rel(d.target) : d.error ?? ''
+      return `  - ${d.tool ?? 'unknown tool'} ${target} (${d.rule})`
+    }),
     after ? `- git status after the run${changed.length ? ':' : ': no new changes'}` : '- not a git checkout',
     ...changed.map(([f, code]) => `  - ${code} ${f}`),
     ...(preDirty ? [`  (${preDirty} path(s) were already dirty before the run and are not listed)`] : []),
     ...(tools.some(t => /subagent/.test(t.tool_name ?? ''))
       ? ["- ⚠ agy ran its own subagents: their edits and commands are not listed above; git status is the full record"]
       : []),
-    ...(readOnly && (writes.length || changed.length) ? ['- ⚠ read-only job, but files changed'] : []),
+    ...(readOnly && (writes.some(w => !mark(w)) || changed.length) ? ['- ⚠ read-only job, but files changed'] : []),
     ...(stopped.length ? [`- stopped processes agy left running: ${stopped.map(c => `\`${c.slice(0, 80)}\``).join(', ')}`] : []),
     `- job dir: ${dir}`,
   ]
@@ -191,6 +306,20 @@ function run(opts) {
   const cwd = process.cwd()
   const agy = findAgy() ?? die(EXIT.missing, 'agy is not installed (looked in $AGY_BIN, ~/.local/bin, PATH)')
   preflight(agy, model)
+  const realCwd = fs.realpathSync(cwd)
+  const agent = process.env.AGY_DELEGATE_AGENT || AGENT
+  const setupFailed = msg => {
+    updateMeta(dir, { verdict: msg })
+    die(EXIT.setup, msg)
+  }
+  let agyDir
+  try {
+    agyDir = writeJobConfig({ dir, worktree: realCwd, mode, readOnly: opts.readOnly, model, paths: briefPaths(brief) })
+  } catch (error) {
+    setupFailed(`could not write the job config: ${error.message}`)
+  }
+  const problem = checkJobConfig(agy, cwd, agyDir, agent)
+  if (problem) setupFailed(`job rules did not load: ${problem}`)
 
   const prompt = [
     read(path.join(SKILL_DIR, 'prompts', 'preamble.md')).trim(),
@@ -207,12 +336,12 @@ function run(opts) {
   const before = gitStatus(cwd)
 
   const args = ['-p=', '--input-format', 'stream-json', '--output-format', 'stream-json', '--model', model]
-  args.push('--dangerously-skip-permissions', '--print-timeout', `${timeoutS}s`)
+  args.push('--dangerously-skip-permissions', '--print-timeout', `${timeoutS}s`, '--add-dir', agyDir, '--agent', agent)
   if (opts.resume) args.push('--conversation', opts.resume)
   const child = spawn(agy, args, {
     cwd,
     detached: true, // own process group, so cancel and timeouts also stop the commands agy started
-    env: { ...process.env, AGY_DELEGATE_JOB: dir },
+    env: { ...process.env, AGY_DELEGATE_JOB: dir, AGY_DELEGATE_ROLE: '' },
     stdio: [fs.openSync(input, 'r'), fs.openSync(eventsFile, 'a'), fs.openSync(agyErr, 'a')],
   })
   log(`${mode} job started: ${model}, print-timeout ${timeoutS}s, pid ${child.pid}, cwd ${cwd}`)
@@ -232,7 +361,6 @@ function run(opts) {
   const guard = setTimeout(() => stop('guard'), (timeoutS + GUARD_S) * 1000)
   for (const sig of Object.keys(SIGNALS)) process.on(sig, () => stop(sig))
   // agy must bind to this checkout. It did on 1.3.3; fail fast if a later version picks another root.
-  const realCwd = fs.realpathSync(cwd)
   const checkBinding = () => {
     const init = readEvents(eventsFile).find(e => e.event === 'init')?.init
     if (!init) return false
@@ -244,12 +372,25 @@ function run(opts) {
     return true
   }
   const watcher = setInterval(() => checkBinding() && clearInterval(watcher), 1000)
+  // PreInvocation writes the canary before the first model call. A finished step without it means the
+  // job's hooks are not running, so nothing is enforced.
+  const canary = path.join(dir, CANARY)
+  const checkCanary = () => {
+    if (fs.existsSync(canary)) return true
+    const stepDone = readEvents(eventsFile).some(
+      e => ['tool', 'agent_response'].includes(e.step_update?.step_type) && e.step_update.state === 'DONE',
+    )
+    if (stepDone) stop('setup')
+    return stepDone
+  }
+  const canaryWatch = setInterval(() => checkCanary() && clearInterval(canaryWatch), 1000)
   const tracked = new Map()
   const tracker = setInterval(() => descendants(child.pid, tracked), 1000)
 
   child.on('exit', async code => {
     clearTimeout(guard)
     clearInterval(watcher)
+    clearInterval(canaryWatch)
     clearInterval(tracker)
     const stopped = await reap(tracked, child.pid)
     checkBinding()
@@ -265,8 +406,13 @@ function run(opts) {
     let why
     if (SIGNALS[stopReason]) [exit, why] = [128 + SIGNALS[stopReason], `runner got ${stopReason}; agy was stopped`]
     else if (stopReason?.startsWith('workspace')) [exit, why] = [EXIT.failed, `agy bound to ${stopReason.slice(10)}, not ${cwd}`]
+    else if (stopReason === 'setup')
+      [exit, why] = [EXIT.setup, `job rules did not load: agy finished a step with no canary ($JOB/${CANARY}) and was stopped`]
     else if (stopReason === 'guard') [exit, why] = [EXIT.timeout, `agy outlived --print-timeout by ${GUARD_S}s and was killed`]
-    else if (/print timeout after .*partial output/.test(errText))
+    else if (!fs.existsSync(canary)) {
+      const detail = `${result?.error ?? ''}\n${errText}`.trim().split('\n')[0]
+      ;[exit, why] = [EXIT.setup, `job rules did not load: no canary ($JOB/${CANARY}) after the run${detail ? `; agy said: ${detail}` : ''}`]
+    } else if (/print timeout after .*partial output/.test(errText))
       [exit, why] = [EXIT.timeout, `--print-timeout (${timeoutS}s) expired mid-turn; the answer is partial`]
     else if (result?.denied_actions?.length)
       [exit, why] = [EXIT.denied, `agy was denied: ${result.denied_actions.map(d => d.display_name ?? d.action).join(', ')}`]
@@ -278,8 +424,10 @@ function run(opts) {
 
     const answer = result?.response?.trim() ? result.response : said
     if (answer.trim()) process.stdout.write(answer.endsWith('\n') ? answer : `${answer}\n`)
-    report({ cwd, dir, model, exit, why, result, events, before, readOnly: opts.readOnly, stopped })
-    updateMeta(dir, { verdict: why })
+    const denies = readHookLog(dir).filter(e => e.hook === 'PreToolUse' && e.decision === 'deny')
+    const loaded = fs.existsSync(canary)
+    report({ cwd, dir, model, exit, why, result, events, before, readOnly: opts.readOnly, stopped, denies, loaded })
+    updateMeta(dir, { verdict: why, blocked: denies.length })
     process.exit(exit)
   })
 }

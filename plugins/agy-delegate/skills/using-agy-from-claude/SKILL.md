@@ -16,12 +16,29 @@ to you. The agent definition that preloaded this skill says which mode you run: 
   and never substitute your own answer for a missing one. The only state you change goes through
   this skill's helpers: the job directory, and in implement mode `wt-setup` and `wt-finish`.
 - agy runs with `--dangerously-skip-permissions` in your current directory. The user accepts that.
-  What limits it is the brief's scope, the runner's report of what agy touched, and the delegating
-  agent's checks afterwards.
+  What limits it is the job rules below, the brief's scope, the runner's report of what agy touched,
+  and the delegating agent's checks afterwards.
 - Never pass on agy's claim that tests or checks pass as verified. Verification belongs to the
   delegating agent; you report what changed.
 - One write job per checkout at a time. The runner refuses a second one (exit 16). Jobs in other
   worktrees run in parallel.
+
+## Job rules
+
+The runner writes an agy config for each job to `<dir>/agy/`: a main agent, `delegate-implementer`,
+and hooks. It launches agy with `--add-dir <dir>/agy --agent delegate-implementer`, so nothing goes
+into the checkout or into agy's global config. The agent has no subagent, browser or MCP tools. The
+hooks block these calls:
+
+- In every job: git commands that change repository state (commit, push, reset, checkout, stash,
+  merge and the like) and other AI CLIs (`claude`, `codex`, `gemini`, `agy`, `coderabbit`).
+- In implement jobs: `gh` commands that write to GitHub, dependency installs and changes, and file
+  writes outside the worktree, outside `paths:`, or to ticket files, `MAP.md` and `SPEC.md`.
+- In read-only jobs: every file write.
+
+agy sees the reason for each block. The runner's report lists them under "blocked by job rules", and
+`<dir>/hook.log` has every decision. Matching a command line stops accidents, not intent: a script
+file still runs a blocked command, so the scope check and the caller's review stay.
 
 ## Runtime
 
@@ -103,8 +120,9 @@ implement mode, then deliver the whole reply in a single `SubagentHandback` call
 tool; without it, end your run with the reply as plain text.
 
 `<dir>/report.md` is the runner's report: the exit reason, the files agy wrote with its edit tools
-(flagging gitignored paths and paths outside the checkout), every shell command it ran, `git status`
-after the run, and any processes it left running that the runner stopped.
+(flagging gitignored paths and paths outside the checkout), every shell command it ran, the calls the
+job rules blocked, `git status` after the run, and any processes it left running that the runner
+stopped.
 
 - **Exit 0.** Reply with a header line, `agy <mode> · <job> · <model>`, then `<dir>/out.md`
   verbatim, then `report.md` verbatim.
@@ -129,6 +147,7 @@ after the run, and any processes it left running that the runner stopped.
 | 14   | model   | Model not available; the error lists the valid ones                            |
 | 15   | denied  | agy was refused a permission it cannot get headless                            |
 | 16   | busy    | Another write job is running in this checkout; `node "$JOBS" jobs` shows it    |
+| 18   | setup   | The job rules did not load, so nothing was enforced. Report it; don't retry until it is fixed |
 | 128+ | signal  | Cancelled or killed                                                            |
 
 ## Messages from the delegating agent
@@ -159,15 +178,28 @@ costs the watching agent more context. Use `tail <job> -f` when the job is alrea
 
 Jobs live in `~/.claude/delegate-jobs/<tool>-<date>-<time>-<rand>/` (override with
 `DELEGATE_JOBS_DIR`). Each holds `meta.json`, `brief.md`, `input.jsonl`, `events.jsonl` (agy's
-stream), `agy-stderr.log`, `out.md`, `err.log` and `report.md`. Old jobs are pruned after 7 days.
+stream), `agy-stderr.log`, `out.md`, `err.log` and `report.md`. agy jobs also hold `agy/` (the job's
+agent and hooks), `state.json`, `hook.log` and `loaded`, the canary the hooks write when they start.
+Old jobs are pruned after 7 days.
 `jobs.mjs` is shared with the `codex-delegate` plugin, which has an identical copy. Each `new` copies
 it to `~/.claude/delegate-jobs/jobs.mjs`, a path that does not depend on where the plugin is
 installed.
 
-## Measured on agy 1.3.3 (2026-10-11)
+## Measured on agy 1.3.3 (2026-10-11 and 12)
 
 - `agy -p` works in the current directory, worktrees included, with no `--add-dir`. The runner
   stops if agy reports another directory. Root and nested `AGENTS.md` files load in print mode.
+- `.agents/hooks.json` in a dir passed with `--add-dir` fires in print mode. Its hooks run in the
+  dir that holds `hooks.json`, and `workspacePaths` lists the config dir first, so the hooks find the
+  job through `AGY_DELEGATE_JOB`. `agy -p /hooks --output-format json` lists those hooks with their
+  source file. Hooks named in an agent's frontmatter do not show up there.
+- `--agent <name>` needs `mainAgent: true` in the agent file. An unknown name runs the default agent
+  and exits 0. `agy -p /agents --output-format json` lists the agents agy can load. Both slash
+  commands answer in about 3 s without calling a model, so the runner checks both before launch.
+  Because workspace hooks fire under any agent, the canary proves the hooks ran, not which agent ran.
+- A `PreToolUse` deny holds under `--dangerously-skip-permissions`. The step ends in state ERROR and
+  the model sees the reason. Empty output, a crash or a timeout also deny. The stream carries no
+  hook events, which is why the hooks write `hook.log`.
 - `-p=` with `--input-format stream-json` reads the prompt from stdin as
   `{"event":"user","message":{"role":"user","content":"…"}}`, so the brief stays out of `ps`.
 - A denied action exits 0 with status `SUCCESS`, an empty answer and `denied_actions`. An expired
