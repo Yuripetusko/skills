@@ -58,13 +58,14 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL('..', import.meta.url)))
 const REVIEW_SCHEMA = path.join(ROOT_DIR, 'schemas', 'review-output.schema.json')
 const DEFAULT_STATUS_WAIT_TIMEOUT_MS = 240000
 const DEFAULT_STATUS_POLL_INTERVAL_MS = 2000
-// max/ultra efforts are deliberately not accepted: xhigh is the ceiling we pay for.
+// max/ultra efforts are deliberately not accepted: xhigh is the ceiling we pay for. Without
+// --effort the run sends none, so model_reasoning_effort in ~/.codex/config.toml applies.
 const VALID_REASONING_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh'])
-const DEFAULT_REASONING_EFFORT = 'xhigh'
-const SUPPORTED_MODELS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol'])
+const SUPPORTED_MODELS = new Set(['gpt-6-astra', 'gpt-6-sol', 'gpt-6.1-sol', 'gpt-6-luna'])
 const MODEL_ALIASES = new Map([
   ['astra', 'gpt-6-astra'],
   ['sol', 'gpt-6-sol'],
+  ['luna', 'gpt-6-luna'],
 ])
 const TERMINATION_SIGNALS = new Map([
   ['SIGHUP', 1],
@@ -80,8 +81,8 @@ function printUsage() {
       '  node scripts/codex-companion.mjs review [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--effort <effort>]',
       '  node scripts/codex-companion.mjs adversarial-review [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--effort <effort>] [focus text]',
       '  node scripts/codex-companion.mjs task [--write] [--resume-last|--resume|--fresh] [--model <model>] [--effort <effort>] [--prompt-file <path>] [prompt]',
-      '    <model>: gpt-6-astra (astra) | gpt-6-sol (sol) | gpt-6.1-sol; default from ~/.codex/config.toml',
-      '    <effort>: medium for small tasks, xhigh (default) for most; also low | high',
+      '    <model>: gpt-6-astra (astra) | gpt-6-sol (sol) | gpt-6.1-sol | gpt-6-luna (luna); default from ~/.codex/config.toml',
+      '    <effort>: low | medium | high | xhigh; default from ~/.codex/config.toml (model_reasoning_effort)',
       '  node scripts/codex-companion.mjs status [job-id] [--all] [--json]',
       '  node scripts/codex-companion.mjs result [job-id] [--json]',
       '  node scripts/codex-companion.mjs cancel [job-id] [--json]',
@@ -112,19 +113,18 @@ function normalizeRequestedModel(model) {
   const resolved = MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized
   if (!SUPPORTED_MODELS.has(resolved)) {
     throw new Error(
-      `Unsupported model "${model}". Use one of: ${[...SUPPORTED_MODELS].join(', ')} (aliases: astra, sol).`,
+      `Unsupported model "${model}". Use one of: ${[...SUPPORTED_MODELS].join(', ')} (aliases: ${[...MODEL_ALIASES.keys()].join(', ')}).`,
     )
   }
   return resolved
 }
 
 function normalizeReasoningEffort(effort) {
-  if (effort == null) {
-    return DEFAULT_REASONING_EFFORT
-  }
-  const normalized = String(effort).trim().toLowerCase()
+  const normalized = String(effort ?? '')
+    .trim()
+    .toLowerCase()
   if (!normalized) {
-    return DEFAULT_REASONING_EFFORT
+    return null
   }
   if (!VALID_REASONING_EFFORTS.has(normalized)) {
     throw new Error(

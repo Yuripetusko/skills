@@ -22,7 +22,7 @@ export const BROKER_BUSY_RPC_CODE = -32001
 const DEFAULT_CLIENT_INFO = {
   title: 'Codex Plugin',
   name: 'Claude Code',
-  version: '1.0.6-quotez',
+  version: '1.0.6-fork',
 }
 
 /** @type {InitializeCapabilities} */

@@ -1065,6 +1065,7 @@ export async function runAppServerTurn(cwd, options = {}) {
 
   return withAppServer(cwd, async client => {
     let threadId
+    let resolved = null
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, 'starting')
@@ -1074,6 +1075,7 @@ export async function runAppServerTurn(cwd, options = {}) {
         ephemeral: false,
       })
       threadId = response.thread.id
+      resolved = response
     } else {
       emitProgress(options.onProgress, 'Starting Codex task thread.', 'starting')
       const response = await startThread(client, cwd, {
@@ -1083,9 +1085,16 @@ export async function runAppServerTurn(cwd, options = {}) {
         threadName: options.persistThread ? options.threadName : (options.threadName ?? null),
       })
       threadId = response.thread.id
+      resolved = response
     }
 
-    emitProgress(options.onProgress, `Thread ready (${threadId}).`, 'starting', {
+    // Says which model and effort the run really uses. Effort is sent per turn; without one the
+    // thread's value, from ~/.codex/config.toml, applies.
+    const effort = options.effort
+      ? `effort ${options.effort}`
+      : `effort ${resolved?.reasoningEffort ?? 'default'} (config)`
+    const settings = resolved ? `, model ${resolved.model ?? 'default'}, ${effort}` : `, ${effort}`
+    emitProgress(options.onProgress, `Thread ready (${threadId}${settings}).`, 'starting', {
       threadId,
     })
 

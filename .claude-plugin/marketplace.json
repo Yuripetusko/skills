@@ -1,0 +1,19 @@
+{
+  "name": "yuripetusko-skills",
+  "description": "Yuripetusko's Claude Code plugins: subagents that delegate work to Codex and Antigravity (agy).",
+  "owner": {
+    "name": "Yuripetusko"
+  },
+  "plugins": [
+    {
+      "name": "codex-delegate",
+      "source": "./plugins/codex-delegate",
+      "description": "Subagents that hand work to OpenAI Codex as a background job: codex-agent, codex-implementer, codex-advisor."
+    },
+    {
+      "name": "agy-delegate",
+      "source": "./plugins/agy-delegate",
+      "description": "Subagents that hand work to Google Antigravity (agy, Gemini) as a background job: agy-agent, agy-implementer."
+    }
+  ]
+}

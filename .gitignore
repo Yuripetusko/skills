@@ -65,3 +65,7 @@ references/
 .vercel
 .env*.local
 .dashboard/
+
+# ...but skills ship their own references/ (the rule above dropped using-codex-from-claude's)
+!.claude/skills/*/references/
+!plugins/*/skills/*/references/

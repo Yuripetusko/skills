@@ -1,6 +1,6 @@
 ---
 name: using-codex-from-claude
-description: How a Claude subagent runs OpenAI Codex (GPT-6) as a background job and relays its answer. Preloaded by the codex-agent and codex-advisor subagents; to use Codex, delegate to one of those rather than loading this skill.
+description: How a Claude subagent runs OpenAI Codex (GPT-6) as a background job and relays its answer. Preloaded by the codex-delegate plugin's codex-agent, codex-implementer and codex-advisor subagents; to use Codex, delegate to one of those rather than loading this skill.
 user-invocable: false
 ---
 
@@ -11,9 +11,13 @@ definition that preloaded this skill says which modes you may use; everything el
 
 ## Ground rules
 
-- You are a relay. Never analyse the code yourself, never edit files, never summarise or reorder
-  Codex's output, and never substitute your own answer for a missing one.
-- One Codex job at a time.
+- You are a relay. Never analyse the code yourself, never author changes, never summarise or reorder
+  Codex's output, and never substitute your own answer for a missing one. The only state you change
+  goes through this skill's helpers: the job directory, and in implementer mode `wt-setup` and
+  `wt-finish`.
+- One Codex job per relay, and one write job per checkout at a time. The runner refuses a second
+  write job in the same checkout (exit 16). Read-only jobs, and jobs in other worktrees, run in
+  parallel.
 - Codex reasons deeply and slowly (minutes, sometimes tens of minutes). That is expected: it is why
   the delegating agent chose Codex for planning, adversarial review, hard root causes, independent
   verification of Claude's work, or comparing approaches.
@@ -24,9 +28,12 @@ Every Bash call starts a fresh shell, and shell variables do not survive between
 call with:
 
 ```bash
-CODEX="${CLAUDE_SKILL_DIR}/scripts/codex-companion.mjs"
-[ -f "$CODEX" ] || CODEX="$HOME/.claude/skills/using-codex-from-claude/scripts/codex-companion.mjs"
+SKILL="${CLAUDE_SKILL_DIR}"
+CODEX="$SKILL/scripts/codex-companion.mjs"; JOBS="$SKILL/scripts/jobs.mjs"
 ```
+
+Claude Code writes this skill's directory into the first line when it loads the skill. If that line
+shows a variable name instead of a path, use the "Base directory for this skill" path instead.
 
 Stay in the directory you were started in: Codex works on that checkout.
 
@@ -38,6 +45,7 @@ Stay in the directory you were started in: Codex works on that checkout.
 | A review with a focus, or a challenge to the approach or design of a diff          | `adversarial-review` |
 | Anything else: a plan or decision to assess, root cause, research, alternatives    | `task`               |
 | Codex itself making code changes, stated explicitly                                 | `task --write`       |
+| A scoped change in a worktree, from `codex-implementer`                            | `task --write`, implementer mode (section 4) |
 
 Review target for both review modes: by default the working tree if it has changes, otherwise the
 branch against the default branch. Use `--scope working-tree`, `--scope branch` or `--base <ref>`
@@ -47,45 +55,70 @@ means `adversarial-review`. Material that is not in the diff (a plan, a design d
 
 ## 2. Write the brief
 
-Create a job directory with `mktemp -d -t codex` and carry its literal path forward. Save the brief
-exactly as you received it to `<dir>/brief.md` with a quoted heredoc. For `task`, if the brief has
+Create the job with `node "$JOBS" new codex --label "<mode>: <a few words of the task>"`. It prints
+the job directory; carry its literal path forward. Save the brief exactly as you received it to
+`<dir>/brief.md` with a quoted heredoc. For `task`, if the brief has
 no output contract, append one: lead with the answer or findings, cite `file:line`, separate
 verified facts from inferences, and list open questions. Add nothing else. Guidance for briefs that
 need tightening: `references/prompting.md` next to this file.
 
 ## 3. Choose model and effort
 
-- **Model.** Leave `--model` unset unless the brief names one. Allowed: `gpt-6-astra`,
-  `gpt-6-sol`, `gpt-6.1-sol` (aliases `astra`, `sol`). Anything else is rejected.
-- **Effort.** `--effort medium` for small, bounded asks (a few files, one focused question).
-  Otherwise leave the default, `xhigh`. Never ask for `max` or `ultra`; they are rejected.
+- **Model.** Leave `--model` unset unless the brief names one; the default is `model` in
+  `~/.codex/config.toml`. Allowed: `gpt-6-astra`, `gpt-6-sol`, `gpt-6.1-sol`, `gpt-6-luna` (aliases
+  `astra`, `sol`, `luna`). Anything else is rejected.
+- **Effort.** Leave `--effort` unset unless the brief names one, or the ask is small and bounded (a
+  few files, one focused question): then `--effort medium`. Unset, Codex uses
+  `model_reasoning_effort` from `~/.codex/config.toml`. `low`, `high` and `xhigh` are accepted;
+  `max` and `ultra` are rejected. The `Thread ready` line in `err.log` names the model and effort
+  the run actually uses.
 
 ## 4. Write jobs (`--write`)
 
 Codex edits the checkout you run in, which other agents may share. Run a write job only when the
 brief asks for changes and names the files or area. Add to the brief: stay inside that scope, and do
-not touch or revert uncommitted changes outside it. Run one write job per checkout at a time.
-Review modes and `task` without `--write` are read-only sandboxes.
+not touch or revert uncommitted changes outside it. Review modes and `task` without `--write` are
+read-only sandboxes.
+
+**Implementer mode** (`codex-delegate:codex-implementer`). The brief may start with header lines, then a blank line
+and the task: `base: <ref>`, `install: yes`, `paths: <paths or globs>`, `commit: <message>`,
+`model:`, `effort:`. `paths:` is required; ask for it if missing. Its entries are separated by
+spaces, and an entry that contains spaces goes in double quotes.
+
+1. If the brief has `base:` or `install:`, prepare the worktree in the foreground with
+   `timeout: 600000`: `node "$JOBS" wt-setup [--base <ref>] [--install]`. It refuses a main checkout
+   and a dirty worktree. `--install` runs the repo's `setup-worktree` script, or else a frozen
+   install. If it fails or asks for input, stop and reply with its output.
+2. Append the rules: `cat "$SKILL/prompts/implementer.md" >> "<dir>/brief.md"`.
+3. Launch `task --write` as in section 5.
+4. After exit 0, run `node "$JOBS" wt-finish --paths '<the paths: value as written>'`, adding `--message "<commit>"` when
+   the brief has `commit:`. Codex's sandbox cannot write a worktree's git metadata, so committing
+   happens here. Exit 2 means changes outside `paths`: nothing was committed, and you revert
+   nothing. Append its output to your reply.
 
 ## 5. Launch once, in the background
 
-- **Invoker.** Use the job directory's basename (for example `codex.paLMTC3xnf`): `mktemp` makes it
-  unique, which made-up names are not. Pass it as `--invoker` on every call for that job. It gives
-  the job its own Codex broker and scopes `--resume-last` to it.
+- **Invoker.** Use the job directory's basename (for example `codex-YYYYMMDD-HHMMSS-XXXXXX`): `new`
+  makes it unique, which made-up names are not. Pass it as `--invoker` on every call for that job.
+  It gives the job its own Codex broker and scopes `--resume-last` to it.
 - **Launch** with a single Bash call, `run_in_background: true`, `timeout: 7200000`. Always in the
   background, even for a small ask: a foreground Bash call is killed after 10 minutes, Codex runs
   routinely take longer, and you cannot predict which ones will.
 
   ```bash
   DIR=<job dir>; NAME=<invoker>
-  node "$CODEX" task --invoker "$NAME" --prompt-file "$DIR/brief.md" > "$DIR/out.md" 2> "$DIR/err.log"
-  # task --write:       add --write
-  # adversarial-review: node "$CODEX" adversarial-review --invoker "$NAME" [target flags] "$(cat "$DIR/brief.md")" > … 2> …
-  # review:             node "$CODEX" review --invoker "$NAME" [target flags] > … 2> …
+  node "$JOBS" exec "$DIR" -- node "$CODEX" task --invoker "$NAME" --prompt-file "$DIR/brief.md"
+  # task --write:       node "$JOBS" exec "$DIR" --write -- node "$CODEX" task --write --invoker …
+  # adversarial-review: node "$JOBS" exec "$DIR" -- node "$CODEX" adversarial-review --invoker "$NAME" [target flags] "$(cat "$DIR/brief.md")"
+  # review:             node "$JOBS" exec "$DIR" -- node "$CODEX" review --invoker "$NAME" [target flags]
   ```
 
-- Then end your turn with one line: the mode, `<dir>`, and the `$CODEX` path that resolved. Do not
-  poll, sleep, tail, or call `status`: you are re-invoked when the command exits.
+  Do not redirect anything. `exec` writes Codex's stdout to `<dir>/out.md` and its stderr to
+  `<dir>/err.log`, records the job in the shared registry, takes the checkout's write lock for
+  `--write`, and prints Codex's progress lines to the call's own output. That output is what the
+  user sees in the app's background-task panel.
+- Then end your turn with one line: the mode, `<dir>`, and `node "$JOBS" tail <job>` for watching it.
+  Do not poll, sleep, tail, or call `status`: you are re-invoked when the command exits.
 - Never pass `--background`; the runtime rejects it.
 
 ## 6. When the command exits
@@ -95,15 +128,16 @@ The first line of `<dir>/err.log` reads `[codex] Job <id> (invoker …), log: <p
 - **Exit 0.** Reply with a header line, `Codex <mode> · job <id> · full output: <dir>/out.md`, then
   the contents of `<dir>/out.md` verbatim.
 - **Non-zero exit.** Reply with `Codex <mode> failed (exit <code>) · job <id>`, the last 15 lines of
-  `err.log`, and the output of `node "$CODEX" status <id>`. Give no substitute answer.
+  `err.log`, and the output of `node "$CODEX" status <id>`. Give no substitute answer. Exit 16 means
+  another write job holds this checkout; `node "$JOBS" jobs` names it.
 - If `err.log` says the model "is not supported when using Codex with a ChatGPT account", relaunch
   once with `--model sol` and say so in your reply.
 
 ## Messages from the delegating agent
 
 - **"cancel"**: run `node "$CODEX" cancel <job-id> --invoker "$NAME"` and confirm. Stopping a
-  background subagent does not stop its background command, so cancellation always goes through
-  you.
+  background subagent does not stop its background command, so cancellation goes through you, or
+  through `node "$JOBS" cancel <job>`, which anyone can run.
 - **A follow-up to a `task`**: write the new brief to a file and launch
   `task --resume-last --invoker "$NAME" --prompt-file <file>` under the same launch rules. Review
   modes cannot be resumed; start a fresh run.
@@ -133,6 +167,28 @@ Common flags: `--invoker`, `--model`, `--effort`, `--json`.
 
 Read-only runs finish 30 s after Codex's final answer even while its internal subagent turns drain.
 Write runs wait for the whole turn.
+
+## Watching progress
+
+Anyone can find a running job, with no need to know its directory. That includes the delegating
+agent and the user. Each registry entry is the job directory.
+
+```bash
+node ~/.claude/delegate-jobs/jobs.mjs jobs     # running and recent jobs, all checkouts, agy too
+node ~/.claude/delegate-jobs/jobs.mjs tail [<job>] [-f]
+node ~/.claude/delegate-jobs/jobs.mjs cancel <job>
+```
+
+Inside Claude Code the plugin puts `delegate-jobs` on the Bash `PATH`, the same script without the
+`node` prefix (`delegate-jobs jobs`, `delegate-jobs tail <job>`). An orchestrating Claude session can
+have progress pushed to it: right after dispatching a relay, start the Monitor tool on
+`delegate-jobs tail --next -f`. Each finished step arrives as a notification, and the stream ends
+with the job's outcome. Use `tail <job> -f` when the job is already known.
+
+Job directories live in `~/.claude/delegate-jobs/` (override with `DELEGATE_JOBS_DIR`) and are pruned
+after 7 days. `scripts/jobs.mjs` is shared with the `agy-delegate` plugin, which has an identical
+copy. Each `new` copies it to `~/.claude/delegate-jobs/jobs.mjs`, a path that does not depend on
+where the plugin is installed.
 
 ## Where things live
 

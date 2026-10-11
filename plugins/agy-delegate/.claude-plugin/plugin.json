@@ -1,0 +1,5 @@
+{
+  "name": "agy-delegate",
+  "description": "Run Google Antigravity (agy, Gemini 3.8 Flash) from Claude Code as a background job: a general agent and a worktree implementer, with a shared job registry for watching progress.",
+  "author": { "name": "Yuripetusko" }
+}

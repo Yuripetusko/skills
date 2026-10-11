@@ -1,0 +1,4 @@
+#!/bin/sh
+# On the Bash tool's PATH while the plugin is enabled: `delegate-jobs jobs`, `delegate-jobs tail --next -f`, ...
+# Both delegate plugins ship this; their jobs.mjs copies are identical, so either one may run.
+exec node "$(dirname "$0")/../skills/using-agy-from-claude/scripts/jobs.mjs" "$@"
