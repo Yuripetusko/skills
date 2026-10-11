@@ -12,9 +12,9 @@ definition that preloaded this skill says which modes you may use; everything el
 ## Ground rules
 
 - You are a relay. Never analyse the code yourself, never author changes, never summarise or reorder
-  Codex's output, and never substitute your own answer for a missing one. The only state you change
-  goes through this skill's helpers: the job directory, and in implementer mode `wt-setup` and
-  `wt-finish`.
+  Codex's output, and never substitute your own answer for a missing one. The one thing you may add
+  is the optional `Relay notes` section in section 6. The only state you change goes through this
+  skill's helpers: the job directory, and in implementer mode `wt-setup` and `wt-finish`.
 - One Codex job per relay, and one write job per checkout at a time. The runner refuses a second
   write job in the same checkout (exit 16). Read-only jobs, and jobs in other worktrees, run in
   parallel.
@@ -137,6 +137,12 @@ implementer mode, then deliver the whole reply in a single `SubagentHandback` ca
 that tool; without it, end your run with the reply as plain text.
 
 The first line of `<dir>/err.log` reads `[codex] Job <id> (invoker …), log: <path>`.
+
+**Relay notes (optional).** Any reply may end with one `Relay notes` section, after everything above.
+It holds only flags you read in `err.log` (in implementer mode also `wt-finish`'s output): commands
+that were blocked or denied, calls to other AI tools, and files written outside `paths:` or the
+checkout. Write one short line per flag and quote the log. Leave the section out when nothing needs
+flagging. Never summarise, judge or correct Codex's answer in it.
 
 - **Exit 0.** Reply with a header line, `Codex <mode> · job <id> · full output: <dir>/out.md`, then
   the contents of `<dir>/out.md` verbatim.

@@ -13,8 +13,9 @@ to you. The agent definition that preloaded this skill says which mode you run: 
 ## Ground rules
 
 - You are a relay. Never author changes yourself, never summarise, reorder or correct agy's answer,
-  and never substitute your own answer for a missing one. The only state you change goes through
-  this skill's helpers: the job directory, and in implement mode `wt-setup` and `wt-finish`.
+  and never substitute your own answer for a missing one. The one thing you may add is the optional
+  `Relay notes` section in section 5. The only state you change goes through this skill's helpers:
+  the job directory, and in implement mode `wt-setup` and `wt-finish`.
 - agy runs with `--dangerously-skip-permissions` in your current directory. The user accepts that.
   What limits it is the brief's scope, the runner's report of what agy touched, and the delegating
   agent's checks afterwards.
@@ -102,9 +103,18 @@ Your reply below is your one final report. Do everything else first, including `
 implement mode, then deliver the whole reply in a single `SubagentHandback` call when you have that
 tool; without it, end your run with the reply as plain text.
 
+`<dir>/out.md` is agy's final answer. The runner drops waiting-status lines such as "I am waiting for
+the type-check" from its start; `events.jsonl` keeps the raw text. Relay `out.md` as it is.
+
 `<dir>/report.md` is the runner's report: the exit reason, the files agy wrote with its edit tools
 (flagging gitignored paths and paths outside the checkout), every shell command it ran, `git status`
 after the run, and any processes it left running that the runner stopped.
+
+**Relay notes (optional).** Any reply may end with one `Relay notes` section, after everything above.
+It holds only flags you read in `report.md` (in implement mode also `wt-finish`'s output): commands
+that were blocked or denied, calls to other AI tools, and files written outside `paths:` or the
+checkout. Write one short line per flag and quote the report. Leave the section out when nothing
+needs flagging. Never summarise, judge or correct agy's answer in it.
 
 - **Exit 0.** Reply with a header line, `agy <mode> · <job> · <model>`, then `<dir>/out.md`
   verbatim, then `report.md` verbatim.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Runs one Google Antigravity (agy) job headless for a Claude subagent and classifies the outcome.
-// stdout gets agy's final answer verbatim; stderr and <job>/report.md get the runner's report: exit
+// stdout gets agy's final answer, minus leading waiting-status lines; stderr and <job>/report.md get the runner's report: exit
 // reason, files agy wrote (from its tool calls), commands it ran, and git status after the run.
 // Behaviour this relies on was measured on agy 1.3.3; see SKILL.md, "Measured on agy 1.3.3".
 
@@ -36,6 +36,36 @@ const readEvents = file =>
         return []
       }
     })
+
+// agy narrates while it waits on a background command ("I am waiting for the type-check to complete")
+// and those lines can lead its final answer. out.md drops them; events.jsonl keeps the raw text.
+// Each template is a status sentence seen in the field. A line that fits none of them stays.
+const CHECK = String.raw`(?:type-?check|lint(?:er)?|checks?|task|command|tests?)`
+const WAITING = [
+  // "I am waiting for the lint check on a package to finish." / "Waiting for task to complete."
+  new RegExp(String.raw`^(?:I am waiting|I'm waiting|Waiting) for [^.!?]{0,100}?\b${CHECK}\b[^.!?]{0,60}? to (?:complete|finish)\.$`, 'i'),
+  // "I have started the lint check and will wait for it to complete."
+  /^I have (?:launched|started|run) [^.!?]{1,120}? and (?:will wait|am waiting) for (?:it|them|the command|the check) to (?:complete|finish)\.$/i,
+  // "The type-check command is running in the background." / "Baseline lint check is running across packages."
+  /^(?:(?:the|this) )?(?:(?:baseline|total|target|full) )*(?:type-?check|lint(?:er)?)(?: (?:check|command|task))? is running (?:in the background|across [^.!?]{0,60})\.$/i,
+  // "I will await its completion." / "I will wait for it to complete."
+  /^I will (?:await its completion|wait for it to (?:complete|finish))\.$/i,
+]
+const isWaitingLine = line =>
+  line
+    .trim()
+    .split(/(?<=[.!?])\s+/)
+    .every(s => WAITING.some(re => re.test(s)))
+// Only leading lines go, up to the first line that is not a waiting line. An answer that is nothing
+// but waiting lines stays as it is.
+function dropWaitingLines(text) {
+  const lines = text.split('\n')
+  let i = 0
+  while (i < lines.length && (!lines[i].trim() || isWaitingLine(lines[i]))) i++
+  const dropped = lines.slice(0, i).filter(l => l.trim()).length
+  const rest = lines.slice(i).join('\n')
+  return dropped && rest.trim() ? { text: rest, dropped } : { text, dropped: 0 }
+}
 
 function parseArgs(argv) {
   const opts = { _: [] }
@@ -277,7 +307,9 @@ function run(opts) {
     else [exit, why] = [EXIT.ok, 'agy finished']
 
     const answer = result?.response?.trim() ? result.response : said
-    if (answer.trim()) process.stdout.write(answer.endsWith('\n') ? answer : `${answer}\n`)
+    const { text: shown, dropped } = dropWaitingLines(answer)
+    if (dropped) log(`dropped ${dropped} leading waiting line(s) from the answer; events.jsonl keeps them`)
+    if (shown.trim()) process.stdout.write(shown.endsWith('\n') ? shown : `${shown}\n`)
     report({ cwd, dir, model, exit, why, result, events, before, readOnly: opts.readOnly, stopped })
     updateMeta(dir, { verdict: why })
     process.exit(exit)
