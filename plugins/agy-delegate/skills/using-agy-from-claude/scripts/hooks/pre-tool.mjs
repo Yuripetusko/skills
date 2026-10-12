@@ -214,6 +214,13 @@ export const TOOL_RULES = [
 const GUARDED_TOOLS = new Set(TOOL_RULES.flatMap(r => [...r.tools]))
 const mcpTarget = args => (args.ServerName ? `${args.ServerName}/${args.ToolName ?? ''}` : '')
 
+// A read-only job may call an MCP tool unless its name has a write verb as a word. No verb at all: allowed and logged.
+const MCP_WRITE_VERBS = new Set(['write', 'create', 'update', 'delete', 'remove', 'edit', 'move', 'rename', 'post', 'put', 'patch', 'set', 'insert', 'upsert', 'send', 'comment', 'add', 'archive', 'close', 'merge'])
+const MCP_READ_VERBS = new Set(['list', 'get', 'read', 'search', 'query', 'find', 'fetch', 'describe'])
+// Words of a tool name: write_file, writeFile, write-file and write.file all give [write, file].
+const nameWords = name => String(name ?? '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+const verbIn = (words, verbs) => words.find(w => [w, w.replace(/s$/, ''), w.replace(/es$/, '')].some(v => verbs.has(v)))
+
 // Case-insensitive: macOS file systems treat spec.md and SPEC.md as one file.
 const PLAN_FILE = /(^|-)ticket\.md$|^(map|spec)\.md$/i
 
@@ -309,6 +316,12 @@ export function decide(call, state) {
   const args = call?.args ?? {}
   const toolRule = TOOL_RULES.find(r => r.modes.includes(state.mode) && r.tools.has(call?.name))
   if (toolRule) return blocked(toolRule, call.name === 'call_mcp_tool' ? mcpTarget(args) : '')
+  if (call?.name === 'call_mcp_tool' && state.readOnly) {
+    const words = nameWords(args.ToolName)
+    const write = verbIn(words, MCP_WRITE_VERBS)
+    if (write) return blocked({ id: 'mcp-write', why: `this job is read-only, and the MCP tool ${args.ToolName} names a write (${write})` }, mcpTarget(args))
+    if (!verbIn(words, MCP_READ_VERBS)) return { decision: 'allow', target: mcpTarget(args), note: 'mcp-unclassified' }
+  }
   if (call?.name === 'run_command') {
     const line = String(args.CommandLine ?? '')
     if (mentionsJob(line, state)) return blocked(JOB_FILES, line)
@@ -351,7 +364,7 @@ async function main() {
     // A changed state.json could widen paths:, so every call is denied, reads included.
     const d = stateHash(state) === process.env.AGY_DELEGATE_STATE_SHA ? decide(call, state) : blocked(STATE_CHANGED, '')
     const target = d.target.length > 300 ? `${d.target.slice(0, 297)}...` : d.target
-    logLine(dir, { hook: 'PreToolUse', decision: d.decision, rule: d.rule, tool: call?.name, target, ...(target ? {} : { keys: Object.keys(call?.args ?? {}) }) })
+    logLine(dir, { hook: 'PreToolUse', decision: d.decision, rule: d.rule, note: d.note, tool: call?.name, target, ...(target ? {} : { keys: Object.keys(call?.args ?? {}) }) })
     console.log(JSON.stringify(d.decision === 'deny' ? { decision: 'deny', reason: d.reason } : { decision: 'allow' }))
   } catch (error) {
     // Fail closed for the calls the rules cover, open for the rest.

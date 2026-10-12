@@ -41,8 +41,11 @@ calls:
   files, `MAP.md` and `SPEC.md`.
 - In read-only jobs: every file write.
 
-Task jobs can call the MCP servers configured in agy, also when read-only, because agy adds its MCP
-tools to an agent whatever the agent's `tools` list says. They can also run `gh` reads and writes and
+Task jobs can call the MCP servers configured in agy, because agy adds its MCP tools to an agent
+whatever the agent's `tools` list says. A read-only task job loses MCP tools whose name has a write
+verb as a word (`write_file`, `createIssue`, `delete`, `send`, `add` and the like) and keeps `list`,
+`get`, `read`, `search`, `query`, `find`, `fetch` and `describe`. A name with neither kind is allowed and
+logged in `hook.log` with the note `mcp-unclassified`. Task jobs can also run `gh` reads and writes and
 dependency commands. In print mode agy 1.3.3 offered no browser tools, so a task job cannot drive a
 browser.
 
