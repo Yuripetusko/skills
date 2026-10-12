@@ -55,21 +55,33 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   any changed file outside the baseline's scope, go back to agy with the instruction to fix them
   without suppressing them. agy gets 3 such rounds. If the 4th check still fails, the hook lets agy
   stop and the job exits 17 (`gate`).
+- When the check is clean, the hook runs the verifier: a nested, read-only `agy -p` as the
+  `delegate-verifier` agent on `gemini-3.8-flash-medium`, configured in `<dir>/agy-verifier/`. It
+  reads the job's numbered diff, the brief, the applicable `AGENTS.md` files and
+  [prompts/verifier-checklist.md](prompts/verifier-checklist.md), and returns PASS or FAIL with
+  `file:line` findings. A FAIL goes back to agy like gate findings and shares the 3 rounds. A run
+  that gives no valid verdict (timeout, crash, invalid result, a changed worktree) fails the round,
+  and the job exits 17 without sending agy back. Its inputs are in `<dir>/verifier/input-<n>/`, its
+  verdict in `<dir>/verifier/result-<n>.json`, and its hook decisions in `hook.log` with
+  `role: verifier`. It checks conventions, not a full review: the caller still reviews the change.
+  On a 4-file change it took 87 to 118 s.
 - agy also stops mid-job, for example at a `wait` step while its own commands run. When the Stop
   input says `fullyIdle: false`, the hook runs no check and spends no round.
 - Each check records the git tree it checked. After agy exits, the runner takes a verdict only from
   a check of this run on the tree agy left. When none covers it, the runner checks the tree itself
-  once: a Stop hook may have crashed or timed out (600 s), agy may have edited after its last check,
-  or no Stop came. That check failing or not running exits 17.
+  once, gate and verifier: a Stop hook may have crashed or timed out (960 s), agy may have edited
+  after its last check, or no Stop came. That check failing or not running exits 17.
 - A rerun in the same job dir keeps the first baseline and the earlier rounds, so findings an
   earlier execution added still count and the 3 rounds are shared.
 - `report.md` opens with a "Gates" section. Its first line is the verdict: `GATE OK`, `GATE FAILED`,
-  `GATE ERROR` or `GATE: not configured`. Then come the baseline, one line per round and the findings
-  still added. `meta.json` keeps the verdict and the rounds in `gate`.
+  `GATE ERROR` or `GATE: not configured`, with the verifier's verdict when it ran. Then come the
+  baseline, one line per round with the verifier's verdict and runtime, the findings sent back, the
+  verifier's model, and the findings still open. `meta.json` keeps the verdict, the rounds and the
+  verifier's verdict in `gate`.
 - Without a config the report says `GATE: not configured`, and nothing is checked.
-- agy's `--print-timeout` gets 40 extra minutes for gate rounds (4 checks at the hook's 600 s
-  timeout). It is capped so the runner ends within 110 minutes of its start, its own check after
-  agy exits included. Whether hook time counts against `--print-timeout` is not measured yet. The
+- agy's `--print-timeout` gets 64 extra minutes for gate rounds (4 Stop hooks at 960 s: a 570 s
+  check, a 330 s verifier run and 60 s for the diff). It is capped so the runner ends within 110
+  minutes of its start, its own check and verifier run after agy exits included. Whether hook time counts against `--print-timeout` is not measured yet. The
   runner's own kill timer allows for both.
 - `--gate-config <path>` on `run` points at a config outside the checkout, for tests.
 
@@ -198,7 +210,7 @@ needs flagging. Never summarise, judge or correct agy's answer in it.
 | 14   | model   | Model not available; the error lists the valid ones                            |
 | 15   | denied  | agy was refused a permission it cannot get headless                            |
 | 16   | busy    | Another write job is running in this checkout; `node "$JOBS" jobs` shows it    |
-| 17   | gate    | The gate still found added findings after 3 rounds, or could not run. The Gates section in `report.md` lists them |
+| 17   | gate    | The gate or the verifier still found problems after 3 rounds, or could not give a verdict. The Gates section in `report.md` lists them |
 | 18   | setup   | The job rules or the gate baseline did not load, so nothing was enforced. Report it; don't retry until it is fixed |
 | 128+ | signal  | Cancelled or killed                                                            |
 
@@ -232,7 +244,9 @@ Jobs live in `~/.claude/delegate-jobs/<tool>-<date>-<time>-<rand>/` (override wi
 `DELEGATE_JOBS_DIR`). Each holds `meta.json`, `brief.md`, `input.jsonl`, `events.jsonl` (agy's
 stream), `agy-stderr.log`, `out.md`, `err.log` and `report.md`. agy jobs also hold `agy/` (the job's
 agent and hooks), `state.json`, `hook.log` and `loaded`, the canary the hooks write when they start.
-Implement jobs with a gate also hold `gate/`: the baseline and each round's snapshot and delta.
+Implement jobs with a gate also hold `gate/`: the baseline and each round's snapshot and delta,
+`agy-verifier/` (the verifier's agent and hook) and `verifier/` (each run's inputs, events and
+verdict).
 Old jobs are pruned after 7 days.
 `jobs.mjs`, `diff.mjs` and `gate.mjs` are shared with the `codex-delegate` plugin, which has identical
 copies. Each `new` copies them to `~/.claude/delegate-jobs/`, a path that does not depend on where the
@@ -287,6 +301,13 @@ come from the current checkout, not from the PR's head.
 - A `PreToolUse` deny holds under `--dangerously-skip-permissions`. The step ends in state ERROR and
   the model sees the reason. Empty output, a crash or a timeout also deny. The stream carries no
   hook events, which is why the hooks write `hook.log`.
+- With `--json-schema`, the `result` event carries the parsed object in `structured_output`;
+  `response` holds the same JSON with extra `toolAction` and `toolSummary` keys. The model delivers
+  it through a `finish` tool call, so an agent with a `tools` list must name `finish`. Without it,
+  a verifier run returned no `structured_output` and took 145 s instead of 49 s.
+- Under `--dangerously-skip-permissions`, `view_file` reads files outside the workspace, so the
+  verifier reads its input dir without an `--add-dir`. Its hook denies reads outside the worktree,
+  that dir and its config dir: a probe verifier wandered into other job files and `~/.gemini`.
 - `-p=` with `--input-format stream-json` reads the prompt from stdin as
   `{"event":"user","message":{"role":"user","content":"…"}}`, so the brief stays out of `ps`.
 - A denied action exits 0 with status `SUCCESS`, an empty answer and `denied_actions`. An expired

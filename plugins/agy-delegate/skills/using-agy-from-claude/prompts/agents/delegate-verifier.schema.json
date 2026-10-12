@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "properties": {
+    "verdict": { "type": "string", "enum": ["PASS", "FAIL"] },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "rule": { "type": "string" },
+          "why": { "type": "string" },
+          "fix": { "type": "string" }
+        },
+        "required": ["file", "line", "rule", "why", "fix"]
+      }
+    }
+  },
+  "required": ["verdict", "findings"]
+}

@@ -17,6 +17,11 @@
 //                   `mid-idle`: the same Stop with fullyIdle true; `last`: every Stop says fullyIdle false
 // FAKE_AFTER_MID_FILE  JSON list of tool calls to make after that mid-job Stop
 // FAKE_KILL_STOP=final  kill the Stop hooks after the answer within 1 ms, before they can write anything
+// FAKE_VERIFIER     for `--agent delegate-verifier` runs: comma-separated answer per gate round (the
+//                   input dir's number), the last one repeating. PASS, FAIL (one finding), none (no
+//                   structured output), invalid, hang, crash (exit 1, no result), write (a write call
+//                   the hook should block, then PASS), scribble (edits the worktree, then PASS)
+// FAKE_VERIFIER_LOG file that gets one JSON line per verifier run: round, cwd, args and env
 // Like agy 1.3.3, a Stop hook that exits non-zero, prints no JSON or times out lets the run stop, and
 // the 11th consecutive continue is ignored. Each Stop answer is logged as a `fake_stop_hook` event.
 
@@ -41,7 +46,7 @@ function slash(name, data) {
 }
 
 if (argv[0] === 'models') {
-  console.log('Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)')
+  console.log('Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)')
   process.exit(0)
 }
 if (argv[0] === '--version') {
@@ -81,6 +86,28 @@ const callHook = (h, input, timeoutMs) => {
 }
 const useHooks = env.FAKE_HOOKS !== '0' && !env.FAKE_FORGE
 const common = { conversationId: 'fake-conv', workspacePaths: [addDir, cwd], modelName: opt('--model') }
+
+if (opt('--agent') === 'delegate-verifier') {
+  const input = env.AGY_DELEGATE_VERIFIER_INPUT ?? ''
+  const round = Number(/input-(\d+)$/.exec(input)?.[1] ?? 1)
+  const answers = (env.FAKE_VERIFIER ?? 'PASS').split(',')
+  const answer = answers[Math.min(round, answers.length) - 1]
+  if (env.FAKE_VERIFIER_LOG)
+    fs.appendFileSync(env.FAKE_VERIFIER_LOG, `${JSON.stringify({ round, cwd, args: argv, role: env.AGY_DELEGATE_ROLE, input, answer })}\n`)
+  const tool = (name, args) => {
+    const decisions = handlers('PreToolUse').map(h => callHook(h, { ...common, toolCall: { name, args } }))
+    out({ event: 'step_update', step_update: { step_index: 1, state: decisions.some(d => d.decision !== 'allow') ? 'ERROR' : 'DONE', step_type: 'tool', tool_name: name, tool_info: { name, parameters: args } } })
+  }
+  tool('view_file', { AbsolutePath: path.join(input, 'diff-numbered.txt') })
+  if (answer === 'write') tool('write_to_file', { TargetFile: path.join(cwd, 'verifier-was-here.txt'), CodeContent: 'x' })
+  if (answer === 'scribble') fs.writeFileSync(path.join(cwd, 'verifier-was-here.txt'), 'x')
+  if (answer === 'hang') sleep(3600)
+  if (answer === 'crash') process.exit(1)
+  const finding = { file: 'pkg/src/b.ts', line: 1, rule: 'SAFETY comments are true', why: 'Nothing checks the value before the cast.', fix: 'Narrow it with a type guard first.' }
+  const structured = { PASS: { verdict: 'PASS', findings: [] }, FAIL: { verdict: 'FAIL', findings: [finding] }, invalid: { verdict: 'MAYBE' } }[answer] ?? (answer === 'none' ? undefined : { verdict: 'PASS', findings: [] })
+  out({ event: 'result', result: { status: 'SUCCESS', response: JSON.stringify(structured ?? 'no json'), duration_seconds: 1, conversation_id: 'fake-verifier', ...(structured ? { structured_output: structured } : {}) } })
+  process.exit(0)
+}
 if (env.FAKE_DELAY_START) sleep(env.FAKE_DELAY_START)
 if (env.FAKE_FORGE) fs.writeFileSync(path.join(env.AGY_DELEGATE_JOB, 'loaded'), '{"agent":"delegate-implementer"}\n')
 if (useHooks) for (const h of handlers('PreInvocation')) callHook(h, { ...common, invocationNum: 0 })

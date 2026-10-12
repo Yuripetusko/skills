@@ -4,7 +4,8 @@
 // reason, files agy wrote (from its tool calls), commands it ran, calls the job's hooks blocked, and git
 // status after the run. agy runs as the per-job agent in $JOB/agy/, whose hooks enforce the job rules.
 // In implement mode the lint and type-check gate runs a baseline before launch, and the Stop hook
-// (hooks/stop.mjs) sends agy back while its change adds findings; report.md then opens with "Gates".
+// (hooks/stop.mjs) sends agy back while its change adds findings or the verifier (hooks/verifier.mjs)
+// finds problems; report.md then opens with "Gates".
 // Behaviour this relies on was measured on agy 1.3.3; see SKILL.md, "Measured on agy 1.3.3".
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -14,7 +15,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { snapshotTree } from './gate.mjs'
-import { CANARY, GATE_DEADLINE_S, readCheck, readHookLog, readState, ROUND_CAP, runGate, STOP_TIMEOUT_S, stateHash, writeState } from './hooks/job.mjs'
+import { CANARY, GATE_DEADLINE_S, readHookLog, readState, ROUND_CAP, runGate, STOP_TIMEOUT_S, stateHash, VERIFIER_DEADLINE_S, writeState } from './hooks/job.mjs'
+import { checkRound, coveredTree, VERIFIER_AGENT, VERIFIER_MODEL, verifierSummary, writeVerifierConfig } from './hooks/verifier.mjs'
 import { updateMeta } from './jobs.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -373,7 +375,7 @@ async function gateBaseline(dir, cwd, configPath) {
 // execution counts only when the tree it checked is the current one. Otherwise, when agy finished
 // normally, the runner runs one check itself; when agy failed, the verdict is error. Returns
 // {verdict, reason, decidedBy, how} and records it in state.json.
-async function settleGate(dir, worktree, runId, mayCheck) {
+async function settleGate(dir, worktree, runId, mayCheck, verifier) {
   const current = readState(dir).gate ?? {}
   const g = current.run === runId ? current : { ...current, verdict: null, reason: null }
   const settle = (patch, history = g.history ?? []) => {
@@ -398,14 +400,14 @@ async function settleGate(dir, worktree, runId, mayCheck) {
   const n = (g.round ?? 0) + 1
   log(`gate: no check covers the tree agy left; the runner checks it (round ${n})`)
   settle({ round: n, verdict: 'error', reason: `the runner's check (round ${n}) did not finish`, decidedBy: n, how: 'runner' })
-  const check = runGate(['check', '--job', dir, '--round', String(n)], { cwd: worktree, deadlineS: GATE_DEADLINE_S })
-  const cancel = () => check.stop()
+  const ctl = {}
+  const cancel = () => ctl.stop?.()
   for (const sig of Object.keys(SIGNALS)) process.on(sig, cancel)
-  const r = await check.done
+  const c = await checkRound({ dir, worktree, n, verifier, ctl })
   for (const sig of Object.keys(SIGNALS)) process.off(sig, cancel)
-  const c = readCheck(dir, n, r)
-  const entry = { run: runId, round: n, verdict: c.verdict, action: 'runner', tree, ...c.fields, ...(c.lines.length ? { lines: c.lines } : {}) }
-  const reason = c.verdict === 'OK' ? null : c.verdict === 'FAILED' ? 'the change adds findings' : c.reason
+  const v = c.verifier ? { verifier: verifierSummary(c.verifier) } : {}
+  const entry = { run: runId, round: n, verdict: c.verdict, action: 'runner', tree: coveredTree(c, tree), ...c.fields, ...v, ...(c.lines.length ? { lines: c.lines } : {}) }
+  const reason = c.verdict === 'OK' ? null : c.verdict === 'FAILED' ? (c.reason ?? 'the change adds findings') : c.reason
   const history = [...(readState(dir).gate?.history ?? []), entry]
   return settle({ round: n, verdict: c.verdict, reason, decidedBy: n, how: 'runner' }, history)
 }
@@ -414,7 +416,7 @@ const ACTION = { continue: 'sent back to agy', stop: 'stop allowed', runner: 'ch
 
 // The Gates section and meta.gate from the settled verdict and the rounds in state.json. Rounds of
 // earlier executions of the job are listed but never decide.
-function gateOutcome(dir, gate, runId, settled) {
+function gateOutcome(dir, gate, runId, settled, verifierBlocked = 0) {
   if (!gate.configured) return { verdict: 'not configured', head: gate.line, lines: [] }
   let g = {}
   try {
@@ -422,12 +424,19 @@ function gateOutcome(dir, gate, runId, settled) {
   } catch {}
   const history = g.history ?? []
   const decided = settled?.decidedBy ? history.find(h => h.run === runId && h.round === settled.decidedBy) : null
+  const verifierRuns = history.filter(h => h.run === runId && h.verifier)
   const verdict = settled?.verdict ?? 'error'
   const counts = h =>
     h?.added == null ? [] : [`${h.added} added, ${h.removed ?? 0} removed${h.outside ? `, ${h.outside} file(s) outside the baseline scope` : ''}`]
+  const verifierText = (h, timed) => {
+    const v = h?.verifier
+    if (!v) return []
+    const what = v.noVerdict ? 'no verdict' : v.verdict === 'FAIL' ? `FAIL, ${v.findings} finding(s)` : 'PASS'
+    return [`verifier ${what}${timed ? ` in ${Math.round((v.durationMs ?? 0) / 1000)}s` : ''}`]
+  }
   const rounds = `${g.round ?? 0} round(s), ${g.continues ?? 0} sent back`
   const reason = settled?.reason ?? 'the runner could not settle the gate verdict'
-  const head = verdict === 'error' ? `GATE ERROR: ${reason} · ${rounds}` : `GATE ${verdict}: ${[...counts(decided), rounds].join(' · ')}`
+  const head = verdict === 'error' ? `GATE ERROR: ${reason} · ${rounds}` : `GATE ${verdict}: ${[...counts(decided), ...verifierText(decided), rounds].join(' · ')}`
   const final = {
     matched: `round ${settled?.decidedBy}'s check covers the tree agy left`,
     runner: `the runner checked the tree agy left in round ${settled?.decidedBy}`,
@@ -435,20 +444,37 @@ function gateOutcome(dir, gate, runId, settled) {
   }[settled?.how]
   const lines = [
     `- baseline: ${gate.line}`,
-    ...history.map(h => {
-      const parts = [h.verdict, ...counts(h), `${Math.round((h.durationMs ?? 0) / 1000)}s`, ACTION[h.action] ?? h.action]
-      return `- round ${h.round}: ${parts.join(', ')}${h.run === runId ? '' : ' (earlier execution)'}`
+    ...history.flatMap(h => {
+      const parts = [h.verdict, ...counts(h), `${Math.round((h.durationMs ?? 0) / 1000)}s`, ...verifierText(h, true), ACTION[h.action] ?? h.action]
+      const line = `- round ${h.round}: ${parts.join(', ')}${h.run === runId ? '' : ' (earlier execution)'}`
+      // What the verifier sent back in a round that did not decide the verdict, so the fixes can be checked.
+      const sent = h !== decided && h.verifier?.verdict === 'FAIL' && h.lines?.length ? h.lines : []
+      return [line, ...indent((sent.length > 10 ? [...sent.slice(0, 9), `... and ${sent.length - 9} more`] : sent).join('\n')).filter(l => l.trim())]
     }),
     ...(final ? [`- ${final}`] : []),
+    ...(verifierRuns.length
+      ? [`- verifier: ${verifierRuns.at(-1).verifier.model}, ${verifierRuns.length} run(s) of ${verifierRuns.map(h => `${Math.round((h.verifier.durationMs ?? 0) / 1000)}s`).join(', ')}`]
+      : []),
     ...(verdict !== 'OK' && decided?.lines?.length ? [verdict === 'FAILED' ? '- still failing:' : '- gate output:', ...indent(decided.lines.join('\n'))] : []),
-    `- details: ${path.join(dir, 'gate')}/`,
+    ...(verifierBlocked ? [`- the verifier's hook blocked ${verifierBlocked} call(s); see hook.log`] : []),
+    `- details: ${path.join(dir, 'gate')}/${history.some(h => h.verifier) ? ` and ${path.join(dir, 'verifier')}/` : ''}`,
   ]
-  const why =
-    verdict === 'FAILED'
-      ? `gate FAILED after ${g.continues ?? 0} round(s) sent back: ${decided?.added ?? '?'} finding(s) added${decided?.outside ? `, ${decided.outside} file(s) outside the baseline scope` : ''}`
-      : `gate error: ${reason}`
+  const failedBy = decided?.verifier
+    ? decided.verifier.noVerdict
+      ? `the verifier produced no verdict (${decided.verifier.reason})`
+      : `the verifier found ${decided.verifier.findings} problem(s)`
+    : `${decided?.added ?? '?'} finding(s) added${decided?.outside ? `, ${decided.outside} file(s) outside the baseline scope` : ''}`
+  const why = verdict === 'FAILED' ? `gate FAILED after ${g.continues ?? 0} round(s) sent back: ${failedBy}` : `gate error: ${reason}`
   // All five fields of `gate check`'s record, so none is left from a check that died after `pending`.
-  const meta = { verdict, added: decided?.added ?? 0, removed: decided?.removed ?? 0, outside: decided?.outside ?? 0, round: decided?.round ?? 0, rounds: g.round ?? 0 }
+  const meta = {
+    verdict,
+    added: decided?.added ?? 0,
+    removed: decided?.removed ?? 0,
+    outside: decided?.outside ?? 0,
+    round: decided?.round ?? 0,
+    rounds: g.round ?? 0,
+    verifier: decided?.verifier ? { verdict: decided.verifier.noVerdict ? 'no verdict' : decided.verifier.verdict, findings: decided.verifier.findings, model: decided.verifier.model, durationMs: decided.verifier.durationMs } : null,
+  }
   return { verdict, head, lines, why, meta }
 }
 
@@ -516,7 +542,7 @@ async function run(opts) {
   const timeoutS = seconds(opts.timeout ?? DEFAULT_TIMEOUT)
   const cwd = process.cwd()
   const agy = findAgy() ?? die(EXIT.missing, 'agy is not installed (looked in $AGY_BIN, ~/.local/bin, PATH)')
-  preflight(agy, model)
+  const models = preflight(agy, model)
   const realCwd = fs.realpathSync(cwd)
   const agent = process.env.AGY_DELEGATE_AGENT || AGENT
   // Implement jobs get the lint and type-check gate. `gate` stays null in task mode.
@@ -531,6 +557,10 @@ async function run(opts) {
     else updateMeta(dir, { verdict: msg })
     die(EXIT.setup, msg)
   }
+  // The verifier runs in implement jobs with a gate, after each clean gate check.
+  const verifierModel = process.env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL
+  if (mode === 'implement' && !opts.readOnly && !models.includes(verifierModel))
+    die(EXIT.model, `verifier model "${verifierModel}" is not in \`agy models\`: ${models.join(', ')}`)
   if (mode === 'implement' && !opts.readOnly) {
     // A rerun in the same job dir keeps the first baseline. A fresh one would take the tree an earlier
     // execution changed as the reference, and the findings it added would no longer count.
@@ -565,16 +595,26 @@ async function run(opts) {
   }
   const problem = checkJobConfig(agy, cwd, agyDir, agent, ['PreToolUse', 'PreInvocation', ...(gate?.configured ? ['Stop'] : [])])
   if (problem) setupFailed(`job rules did not load: ${problem}`)
+  if (gate?.configured) {
+    let verifierDir
+    try {
+      verifierDir = writeVerifierConfig(dir, { model: verifierModel, worktree })
+    } catch (error) {
+      setupFailed(`could not write the verifier config: ${error.message}`)
+    }
+    const vproblem = checkJobConfig(agy, cwd, verifierDir, VERIFIER_AGENT, ['PreToolUse'])
+    if (vproblem) setupFailed(`the verifier's config did not load: ${vproblem}`)
+  }
 
-  // agy's turn limit. With a gate, it also covers ROUND_CAP + 1 Stop hook runs, in case hook time
-  // counts against --print-timeout, and the guard allows for them once more in case it doesn't. Both
-  // stay inside MAX_TIMEOUT_S from the runner's start, less one check the runner may run after agy
-  // exits, so the relay's 2 h Bash call outlives the job.
+  // agy's turn limit. With a gate, it also covers ROUND_CAP + 1 Stop hook runs (gate check plus
+  // verifier), in case hook time counts against --print-timeout, and the guard allows for them once
+  // more in case it doesn't. Both stay inside MAX_TIMEOUT_S from the runner's start, less one check and
+  // verifier run the runner may do after agy exits, so the relay's 2 h Bash call outlives the job.
   let printS = timeoutS
   let guardS = timeoutS + GUARD_S
   if (gate?.configured) {
     const reserve = (ROUND_CAP + 1) * STOP_TIMEOUT_S
-    const budget = Math.max(60, MAX_TIMEOUT_S - GATE_DEADLINE_S - Math.round((Date.now() - started) / 1000))
+    const budget = Math.max(60, MAX_TIMEOUT_S - GATE_DEADLINE_S - VERIFIER_DEADLINE_S - Math.round((Date.now() - started) / 1000))
     printS = Math.min(timeoutS + reserve, budget)
     guardS = Math.min(printS + reserve, budget) + GUARD_S
     if (printS < timeoutS + reserve)
@@ -614,6 +654,9 @@ async function run(opts) {
       AGY_DELEGATE_STATE_SHA: stateSha,
       AGY_DELEGATE_GATE: gate?.configured ? '1' : '',
       AGY_DELEGATE_ROLE: '',
+      // stop.mjs runs the verifier with the same agy binary.
+      AGY_DELEGATE_AGY: agy,
+      AGY_DELEGATE_VERIFIER_MODEL: verifierModel,
     },
     stdio: [fs.openSync(input, 'r'), fs.openSync(eventsFile, 'a'), fs.openSync(agyErr, 'a')],
   })
@@ -707,12 +750,13 @@ async function run(opts) {
       let settled = null
       if (gate.configured) {
         try {
-          settled = await settleGate(dir, worktree, runId, exit === EXIT.ok)
+          settled = await settleGate(dir, worktree, runId, exit === EXIT.ok, { agy, model: verifierModel })
         } catch (error) {
           log(`gate: could not settle the verdict: ${error.message}`)
         }
       }
-      gates = gateOutcome(dir, gate, runId, settled)
+      const verifierBlocked = readHookLog(dir).filter(e => e.run === runId && e.role === 'verifier' && e.decision === 'deny').length
+      gates = gateOutcome(dir, gate, runId, settled, verifierBlocked)
       if (exit === EXIT.ok && !['OK', 'not configured'].includes(gates.verdict)) [exit, why] = [EXIT.gate, gates.why]
     }
 
@@ -720,7 +764,7 @@ async function run(opts) {
     const { text: shown, dropped } = dropWaitingLines(answer)
     if (dropped) log(`dropped ${dropped} leading waiting line(s) from the answer; events.jsonl keeps them`)
     if (shown.trim()) process.stdout.write(shown.endsWith('\n') ? shown : `${shown}\n`)
-    const denies = readHookLog(dir).filter(e => e.run === runId && e.hook === 'PreToolUse' && e.decision === 'deny')
+    const denies = readHookLog(dir).filter(e => e.run === runId && e.hook === 'PreToolUse' && e.decision === 'deny' && e.role !== 'verifier')
     report({ cwd, dir, model, exit, why, result, events, before, readOnly: opts.readOnly, stopped, denies, loaded, gates })
     if (gates?.meta) setMetaGate(dir, gates.meta, { verdict: why, blocked: denies.length })
     else updateMeta(dir, { verdict: why, blocked: denies.length })

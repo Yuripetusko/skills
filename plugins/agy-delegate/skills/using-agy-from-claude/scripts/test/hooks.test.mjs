@@ -121,10 +121,29 @@ test('a broken job fails closed for commands and writes, open for reads', () => 
   assert.ok(hookLog(ctx.job).every(e => e.rule === 'error'))
 })
 
-test('verifier role: allow and log nothing', () => {
+test('verifier role: reads inside the worktree and input dir pass, writes, commands and other reads are denied', () => {
   const ctx = makeJob()
-  assert.deepEqual(replay('run-command-claude.json', ctx, { AGY_DELEGATE_ROLE: 'verifier' }), { decision: 'allow' })
-  assert.deepEqual(hookLog(ctx.job), [])
+  const input = path.join(ctx.job, 'verifier', 'input-1')
+  fs.mkdirSync(input, { recursive: true })
+  const env = { AGY_DELEGATE_ROLE: 'verifier', AGY_DELEGATE_VERIFIER_INPUT: input }
+  const call = (name, args) => runHook('pre-tool.mjs', JSON.stringify({ toolCall: { name, args } }), ctx, env)
+  assert.deepEqual(replay('view-file.json', ctx, env), { decision: 'allow' })
+  assert.deepEqual(call('view_file', { AbsolutePath: path.join(input, 'diff-numbered.txt') }), { decision: 'allow' })
+  assert.deepEqual(call('grep_search', { Query: 'x', SearchPath: ctx.worktree }), { decision: 'allow' })
+  assert.deepEqual(call('finish', { verdict: 'PASS', findings: [] }), { decision: 'allow' })
+  for (const fixture of ['run-command-claude.json', 'run-command-allowed.json', 'write-in-scope.json', 'write-outside-worktree.json'])
+    assert.equal(replay(fixture, ctx, env).decision, 'deny', fixture)
+  const outside = call('view_file', { AbsolutePath: path.join(ctx.job, 'events.jsonl') })
+  assert.equal(outside.decision, 'deny')
+  assert.match(outside.reason, /verifier-outside/)
+  assert.equal(call('list_dir', { DirectoryPath: path.join(ctx.worktree, '..') }).decision, 'deny')
+  const log = hookLog(ctx.job)
+  assert.ok(log.every(e => e.role === 'verifier'))
+  assert.deepEqual(log.filter(e => e.decision === 'allow').map(e => e.tool), ['view_file', 'view_file', 'grep_search', 'finish'])
+  assert.deepEqual(
+    log.filter(e => e.decision === 'deny').map(e => e.rule),
+    ['verifier-read-only', 'verifier-read-only', 'verifier-read-only', 'verifier-read-only', 'verifier-outside', 'verifier-outside'],
+  )
 })
 
 test('pre-invocation writes the canary once per execution; the verifier role writes none', () => {

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// agy PreToolUse hook: applies the job's deny rules and logs every decision to $JOB/hook.log.
+// agy PreToolUse hook: applies the job's deny rules and logs every decision to $JOB/hook.log. Under
+// AGY_DELEGATE_ROLE=verifier it serves the nested verifier run and allows reads only.
 // agy denies on empty output, a crash or a timeout, so every path prints an explicit decision.
 // Matching a command line stops accidents, not intent: a script file or an alias gets past it.
 
@@ -326,26 +327,56 @@ export function decide(call, state) {
   return { decision: 'allow', target: String(target) }
 }
 
+const VERIFIER_WRITE = { id: 'verifier-read-only', why: 'the verifier only reads' }
+const VERIFIER_OUTSIDE = { id: 'verifier-outside', why: 'the verifier reads only the worktree, its input dir and its config dir' }
+const READ_TARGET = ['AbsolutePath', 'SearchPath', 'SearchDirectory', 'DirectoryPath']
+const within = (file, root) => file === root || file.startsWith(root.endsWith('/') ? root : `${root}/`)
+
+// The nested verifier run: every write and every command is denied, and so is a read outside `roots`.
+// `finish`, which carries its verdict, and any call without a path are allowed.
+export function decideVerifier(call, roots) {
+  const args = call?.args ?? {}
+  if (call?.name === 'run_command') return blocked(VERIFIER_WRITE, String(args.CommandLine ?? ''))
+  if (isWrite(call)) return blocked(VERIFIER_WRITE, String(args.TargetFile ?? ''))
+  const key = READ_TARGET.find(k => typeof args[k] === 'string' && args[k])
+  if (!key) return { decision: 'allow', target: '' }
+  const given = args[key].replace(/^file:\/\//, '')
+  const abs = path.isAbsolute(given) ? resolveTarget(given) : resolveTarget(`${roots[0]}/${given}`)
+  if (abs == null || !roots.some(r => within(abs, r))) return blocked(VERIFIER_OUTSIDE, given)
+  return { decision: 'allow', target: abs }
+}
+
+function verifierRoots(dir, state) {
+  const roots = [state.worktree, process.env.AGY_DELEGATE_VERIFIER_INPUT, path.join(dir, 'agy-verifier')].filter(Boolean)
+  return roots.map(r => resolveTarget(r) ?? r)
+}
+
 async function main() {
   const raw = await readStdin()
   let call
+  const role = isVerifier() ? { role: 'verifier' } : {}
   try {
     call = JSON.parse(raw).toolCall
-    if (isVerifier()) return console.log(JSON.stringify({ decision: 'allow' }))
     const dir = jobDir()
     const state = readState(dir)
     // A changed state.json could widen paths:, so every call is denied, reads included.
-    const d = stateHash(state) === process.env.AGY_DELEGATE_STATE_SHA ? decide(call, state) : blocked(STATE_CHANGED, '')
+    const d =
+      stateHash(state) !== process.env.AGY_DELEGATE_STATE_SHA
+        ? blocked(STATE_CHANGED, '')
+        : role.role
+          ? decideVerifier(call, verifierRoots(dir, state))
+          : decide(call, state)
     const target = d.target.length > 300 ? `${d.target.slice(0, 297)}...` : d.target
-    logLine(dir, { hook: 'PreToolUse', decision: d.decision, rule: d.rule, tool: call?.name, target, ...(target ? {} : { keys: Object.keys(call?.args ?? {}) }) })
+    logLine(dir, { hook: 'PreToolUse', ...role, decision: d.decision, rule: d.rule, tool: call?.name, target, ...(target ? {} : { keys: Object.keys(call?.args ?? {}) }) })
     console.log(JSON.stringify(d.decision === 'deny' ? { decision: 'deny', reason: d.reason } : { decision: 'allow' }))
   } catch (error) {
-    // Fail closed for the calls the rules cover, open for the rest.
-    const covered = !call || call.name === 'run_command' || isWrite(call)
+    // Fail closed for the calls the rules cover, open for the rest. The verifier's rules cover every
+    // call except `finish`.
+    const covered = !call || call.name === 'run_command' || isWrite(call) || (role.role && call.name !== 'finish')
     const reason = `Blocked by job rules: the rule check failed (${error.message}).`
     console.log(JSON.stringify(covered ? { decision: 'deny', reason } : { decision: 'allow' }))
     try {
-      logLine(jobDir(), { hook: 'PreToolUse', decision: covered ? 'deny' : 'allow', rule: 'error', tool: call?.name, error: error.message })
+      logLine(jobDir(), { hook: 'PreToolUse', ...role, decision: covered ? 'deny' : 'allow', rule: 'error', tool: call?.name, error: error.message })
     } catch {}
   }
 }

@@ -17,10 +17,14 @@ export const CANARY = 'loaded'
 // The stop gate. agy itself ignores the 11th consecutive continue, so the cap stays well below 10.
 // The Stop hook checks once more after the last continue, so a job runs at most ROUND_CAP + 1 checks.
 export const ROUND_CAP = 3
-// The Stop hook's timeout in hooks.json. A whole-repo check took 147 s warm and about 370 s cold.
-export const STOP_TIMEOUT_S = 600
-// stop.mjs stops its gate check this long before agy would kill the hook, so the verdict says why.
-export const GATE_DEADLINE_S = STOP_TIMEOUT_S - 30
+// The gate check stops here. A whole-repo check took 147 s warm and about 370 s cold.
+export const GATE_DEADLINE_S = 570
+// The verifier's --print-timeout, and the kill timer after it.
+export const VERIFIER_PRINT_S = 300
+export const VERIFIER_DEADLINE_S = VERIFIER_PRINT_S + 30
+// The Stop hook's timeout in hooks.json: one gate check, one verifier run, and a minute for the diff
+// and tree snapshots, so stop.mjs records a verdict before agy kills it.
+export const STOP_TIMEOUT_S = GATE_DEADLINE_S + VERIFIER_DEADLINE_S + 60
 
 const SCRIPTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // `jobs.mjs gate`, or for tests a script that takes the same arguments (AGY_DELEGATE_GATE_BIN).

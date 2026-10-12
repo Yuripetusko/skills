@@ -88,10 +88,11 @@ test('findings in rounds 1-3 and a clean 4th check: three continues, then exit 0
   assert.match(r.stops[0].reason, /This is round 1 of 3/)
   assert.match(r.stops[0].reason, /without suppressing them: disable comments and casts count as findings/)
   assert.ok(r.stops[0].reason.split('\n').length <= 40)
-  assert.match(r.report, /^## Gates\n- GATE OK: 0 added, 0 removed · 4 round\(s\), 3 sent back\n/)
+  assert.match(r.report, /^## Gates\n- GATE OK: 0 added, 0 removed · verifier PASS · 4 round\(s\), 3 sent back\n/)
   assert.equal((r.report.match(/sent back to agy/g) ?? []).length, 3)
-  assert.match(r.report, /- round 4: OK, 0 added, 0 removed, \d+s, stop allowed\n- round 4's check covers the tree agy left\n/)
-  assert.deepEqual(r.meta.gate, { verdict: 'OK', added: 0, removed: 0, outside: 0, round: 4, rounds: 4 })
+  assert.match(r.report, /- round 4: OK, 0 added, 0 removed, \d+s, verifier PASS in \d+s, stop allowed\n- round 4's check covers the tree agy left\n/)
+  assert.equal(r.meta.gate.verifier.verdict, 'PASS')
+  assert.deepEqual({ ...r.meta.gate, verifier: undefined }, { verdict: 'OK', added: 0, removed: 0, outside: 0, round: 4, rounds: 4, verifier: undefined })
   assert.deepEqual(
     r.gateCalls.map(a => a.slice(0, 1).concat(a.slice(3))),
     [['baseline'], ['check', '--round', '1'], ['check', '--round', '2'], ['check', '--round', '3'], ['check', '--round', '4']],
@@ -160,7 +161,7 @@ test('a rerun keeps the baseline and the rounds; an earlier OK is not reused', (
   assert.equal(fs.readFileSync(path.join(ctx.job, 'gate', 'baseline.json'), 'utf8'), baseline)
   assert.deepEqual(r.gateCalls.map(a => a[0]), ['baseline', 'check', 'check'])
   assert.match(r.report, /- baseline: GATE BASELINE: 0 finding\(s\), kept from an earlier execution of this job/)
-  assert.match(r.report, /- round 1: OK, 0 added, 0 removed, \d+s, stop allowed \(earlier execution\)\n- round 2: OK, .*checked by the runner/)
+  assert.match(r.report, /- round 1: OK, 0 added, 0 removed, \d+s, verifier PASS in \d+s, stop allowed \(earlier execution\)\n- round 2: OK, .*verifier PASS in \d+s, checked by the runner/)
 })
 
 test('a Stop while agy still has work running runs no check and spends no round', () => {
@@ -221,9 +222,10 @@ test('with a gate, the agent prompt names the stop check and --print-timeout cov
   const agent = fs.readFileSync(path.join(ctx.job, 'agy', '.agents', 'agents', 'delegate-implementer.md'), 'utf8')
   assert.match(agent, /When you stop, this job runs lint and type-check/)
   const hooks = JSON.parse(fs.readFileSync(path.join(ctx.job, 'agy', '.agents', 'hooks.json'), 'utf8'))
-  assert.equal(hooks['agy-delegate-job'].Stop[0].timeout, 600)
-  // 2 min of work plus 4 Stop hook runs of 600 s.
-  assert.match(r.stderr, /print-timeout 2520s/)
+  // A 570 s gate check, a 330 s verifier run and 60 s for the diff and tree snapshots.
+  assert.equal(hooks['agy-delegate-job'].Stop[0].timeout, 960)
+  // 2 min of work plus 4 Stop hook runs of 960 s.
+  assert.match(r.stderr, /print-timeout 3960s/)
 })
 
 test('a verifier run or a job without a gate leaves stop.mjs inert', () => {
@@ -271,11 +273,19 @@ test('real gate: an `as any` goes back to agy, the fix passes the next check', (
   assert.equal(r.status, 0, r.report)
   assert.deepEqual(r.stops.map(a => a.decision), ['continue', 'stop'])
   assert.match(r.stops[0].reason, /\+ typescript\(no-explicit-any\) {2}pkg\/src\/b\.ts:1:37 {2}Unexpected any/)
-  assert.match(r.report, /- round 1: FAILED, 1 added, 0 removed, \d+s, sent back to agy\n- round 2: OK, 0 added, 0 removed, \d+s, stop allowed/)
+  assert.match(r.report, /- round 1: FAILED, 1 added, 0 removed, \d+s, sent back to agy\n- round 2: OK, 0 added, 0 removed, \d+s, verifier PASS in \d+s, stop allowed/)
   assert.match(r.report, /- baseline: GATE BASELINE: 0 finding\(s\) from 1 command\(s\)/)
   assert.deepEqual(r.state.gate.scope.units, ['pkg'])
   // `gate check --job` wrote each round's record; the runner's final write keeps its shape.
-  assert.deepEqual(r.meta.gate, { verdict: 'OK', added: 0, removed: 0, outside: 0, round: 2, rounds: 2 })
+  assert.deepEqual(r.meta.gate, {
+    verdict: 'OK',
+    added: 0,
+    removed: 0,
+    outside: 0,
+    round: 2,
+    rounds: 2,
+    verifier: { verdict: 'PASS', findings: 0, model: 'gemini-3.8-flash-medium', durationMs: r.meta.gate.verifier.durationMs },
+  })
 })
 
 test('real gate: a broken lint command fails the baseline with exit 18', () => {
@@ -310,7 +320,7 @@ test('real gate: an OK, then an edit, then a final Stop hook killed at once must
   assert.equal(r.status, 17, r.report)
   assert.equal(r.stops[0].decision, 'stop')
   assert.equal(r.stops.at(-1).failed, 'ETIMEDOUT')
-  assert.match(r.report, /- round 1: OK, 0 added, 0 removed, \d+s, stop allowed\n- round 2: FAILED, 1 added, 0 removed, \d+s, checked by the runner after agy exited/)
+  assert.match(r.report, /- round 1: OK, 0 added, 0 removed, \d+s, verifier PASS in \d+s, stop allowed\n- round 2: FAILED, 1 added, 0 removed, \d+s, checked by the runner after agy exited/)
   assert.equal(r.meta.gate.verdict, 'FAILED')
 })
 
@@ -320,4 +330,135 @@ test('real gate: an OK whose tree agy left unchanged stands without another chec
   assert.equal(r.status, 0, r.report)
   assert.match(r.report, /- round 1's check covers the tree agy left/)
   assert.equal(r.state.gate.history.length, 1)
+})
+
+// The verifier, after a clean gate check: fixtures/fake-agy.mjs answers `--agent delegate-verifier`
+// runs from FAKE_VERIFIER, one answer per round.
+const verified = (checks, answers, extra = {}) => ({ env: { ...fake(checks).env, FAKE_VERIFIER: answers, ...extra } })
+const changed = () => setup({ calls: [['pkg/src/b.ts', 'export const b = 1\n']] })
+const verifierRuns = ctx => {
+  const file = path.join(ctx.root, 'verifier-runs.jsonl')
+  return fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)) : []
+}
+const logVerifier = ctx => ({ FAKE_VERIFIER_LOG: path.join(ctx.root, 'verifier-runs.jsonl') })
+
+test('verifier FAIL goes back to agy with its findings, and a PASS in the next round exits 0', () => {
+  const ctx = changed()
+  const r = run(ctx, verified('0', 'FAIL,PASS', logVerifier(ctx)))
+  assert.equal(r.status, 0, r.report)
+  assert.deepEqual(r.stops.map(a => a.decision), ['continue', 'stop'])
+  assert.match(r.stops[0].reason, /^An independent check of your change found problems\. .*This is round 1 of 3/)
+  assert.match(r.stops[0].reason, /\n- pkg\/src\/b\.ts:1 \[SAFETY comments are true\] Nothing checks the value before the cast\. Fix: Narrow it/)
+  assert.ok(r.stops[0].reason.split('\n').length <= 40)
+  assert.match(r.report, /^## Gates\n- GATE OK: 0 added, 0 removed · verifier PASS · 2 round\(s\), 1 sent back\n/)
+  assert.match(r.report, /- round 1: FAILED, 0 added, 0 removed, \d+s, verifier FAIL, 1 finding\(s\) in \d+s, sent back to agy\n {2}- pkg\/src\/b\.ts:1 \[SAFETY/)
+  assert.match(r.report, /- round 2: OK, 0 added, 0 removed, \d+s, verifier PASS in \d+s, stop allowed\n/)
+  assert.match(r.report, /- verifier: gemini-3\.8-flash-medium, 2 run\(s\) of \d+s, \d+s\n/)
+  // The nested run: the worktree as cwd, its own config dir and agent, the schema, the verifier role.
+  const runs = verifierRuns(ctx)
+  assert.equal(runs.length, 2)
+  assert.equal(runs[0].cwd, ctx.repo)
+  assert.equal(runs[0].role, 'verifier')
+  const args = runs[0].args.join(' ')
+  assert.match(args, new RegExp(`--add-dir ${path.join(ctx.job, 'agy-verifier')} --agent delegate-verifier --json-schema \\S+delegate-verifier\\.schema\\.json`))
+  assert.match(args, /--model gemini-3\.8-flash-medium .*--print-timeout 300s/)
+  assert.ok(!runs[0].args.includes(path.join(ctx.job, 'agy')), 'the verifier must not load the implementer config')
+  const input = path.join(ctx.job, 'verifier', 'input-1')
+  assert.deepEqual(fs.readdirSync(input).sort(), ['brief.md', 'checklist.md', 'diff-numbered.txt', 'diff.patch', 'files.json', 'rules.json'])
+  assert.match(fs.readFileSync(path.join(input, 'diff-numbered.txt'), 'utf8'), /pkg\/src\/b\.ts/)
+  const result = JSON.parse(fs.readFileSync(path.join(ctx.job, 'verifier', 'result-1.json'), 'utf8'))
+  assert.equal(result.verdict, 'FAIL')
+  assert.equal(result.findings[0].rule, 'SAFETY comments are true')
+})
+
+test('verifier FAIL in every round: the cap allows the stop and exit 17 lists the findings', () => {
+  const ctx = changed()
+  const r = run(ctx, verified('0', 'FAIL'))
+  assert.equal(r.status, 17, r.report)
+  assert.deepEqual(r.stops.map(a => a.decision), ['continue', 'continue', 'continue', 'stop'])
+  assert.match(r.report, /^## Gates\n- GATE FAILED: 0 added, 0 removed · verifier FAIL, 1 finding\(s\) · 4 round\(s\), 3 sent back\n/)
+  assert.match(r.report, /- still failing:\n {2}- pkg\/src\/b\.ts:1 \[SAFETY comments are true\]/)
+  assert.match(r.report, /- exit 17 \(gate\): gate FAILED after 3 round\(s\) sent back: the verifier found 1 problem\(s\)/)
+  assert.deepEqual({ ...r.meta.gate.verifier, durationMs: 0 }, { verdict: 'FAIL', findings: 1, model: 'gemini-3.8-flash-medium', durationMs: 0 })
+})
+
+for (const [answer, why] of [
+  ['none', /no valid verdict: no structured result/],
+  ['invalid', /no valid verdict: verdict is "MAYBE"/],
+  ['crash', /ended without a result/],
+  ['hang', /ran past 2s and was stopped/],
+  ['scribble', /the worktree changed while the verifier ran/],
+]) {
+  test(`a verifier that gives no verdict (${answer}) fails the job without sending agy back`, () => {
+    const ctx = changed()
+    const r = run(ctx, verified('0', answer, { AGY_DELEGATE_VERIFIER_DEADLINE_S: '2' }))
+    assert.equal(r.status, 17, r.report)
+    assert.deepEqual(r.stops.map(a => a.decision), ['stop'])
+    assert.match(r.report, /^## Gates\n- GATE FAILED: 0 added, 0 removed · verifier no verdict · 1 round\(s\), 0 sent back\n/)
+    assert.match(r.report, why)
+    assert.equal(r.meta.gate.verdict, 'FAILED')
+    assert.equal(r.meta.gate.verifier.verdict, 'no verdict')
+  })
+}
+
+test('the verifier hook blocks a write: hook.log shows no allowed write and the worktree is unchanged', () => {
+  const ctx = changed()
+  const r = run(ctx, verified('0', 'write'))
+  assert.equal(r.status, 0, r.report)
+  const log = fs.readFileSync(path.join(ctx.job, 'hook.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+  const mine = log.filter(e => e.role === 'verifier')
+  assert.deepEqual(mine.map(e => [e.tool, e.decision]), [['view_file', 'allow'], ['write_to_file', 'deny']])
+  assert.ok(!fs.existsSync(path.join(ctx.repo, 'verifier-was-here.txt')))
+  assert.match(r.report, /- the verifier's hook blocked 1 call\(s\); see hook\.log/)
+  // The implementer's own list stays clean.
+  assert.match(r.report, /- blocked by job rules: none/)
+  assert.equal(r.meta.blocked, 0)
+})
+
+test('a FAILED gate check runs no verifier', () => {
+  const ctx = changed()
+  const r = run(ctx, verified('1,0', 'PASS', logVerifier(ctx)))
+  assert.equal(r.status, 0, r.report)
+  assert.deepEqual(verifierRuns(ctx).map(v => v.round), [2])
+  assert.equal(r.state.gate.history[0].verifier, undefined)
+})
+
+test('an empty change passes the verifier without running agy', () => {
+  const ctx = setup()
+  const r = run(ctx, verified('0', 'FAIL', logVerifier(ctx)))
+  assert.equal(r.status, 0, r.report)
+  assert.deepEqual(verifierRuns(ctx), [])
+  assert.match(JSON.parse(fs.readFileSync(path.join(ctx.job, 'verifier', 'result-1.json'), 'utf8')).reason, /the change is empty/)
+})
+
+test('a PASS, then an edit, then a final Stop hook killed at once: the runner runs the verifier too', () => {
+  const ctx = changed()
+  fs.writeFileSync(path.join(ctx.root, 'after-mid.json'), JSON.stringify([ctx.write('pkg/src/c.ts', 'export const c = 1\n')]))
+  const extra = { FAKE_BUSY_STOP: 'mid-idle', FAKE_AFTER_MID_FILE: path.join(ctx.root, 'after-mid.json'), FAKE_KILL_STOP: 'final' }
+  const r = run(ctx, verified('0', 'PASS,FAIL', extra))
+  assert.equal(r.status, 17, r.report)
+  assert.match(r.report, /- round 1: OK, .*verifier PASS in \d+s, stop allowed\n- round 2: FAILED, 0 added, 0 removed, \d+s, verifier FAIL, 1 finding\(s\) in \d+s, checked by the runner after agy exited/)
+})
+
+test('a Stop hook killed while the verifier runs never reads as OK', () => {
+  const ctx = changed()
+  const r = run(ctx, verified('0', 'hang', { FAKE_HOOK_TIMEOUT_S: '2', AGY_DELEGATE_VERIFIER_DEADLINE_S: '4' }))
+  assert.equal(r.status, 17, r.report)
+  assert.equal(r.stops.at(-1).failed, 'ETIMEDOUT')
+  assert.match(r.report, /- round 2: FAILED, .*verifier no verdict in \d+s, checked by the runner after agy exited/)
+  const ps = spawnSync('ps', ['-A', '-o', 'command='], { encoding: 'utf8' }).stdout
+  assert.ok(!ps.split('\n').some(l => l.includes('delegate-verifier') && l.includes(ctx.job)), 'the hung verifier still runs')
+})
+
+test('the generated verifier config: read-only agent with finish, a PreToolUse hook and no Stop hook', () => {
+  const ctx = changed()
+  assert.equal(run(ctx, verified('0', 'PASS')).status, 0)
+  const cfg = path.join(ctx.job, 'agy-verifier', '.agents')
+  const agent = fs.readFileSync(path.join(cfg, 'agents', 'delegate-verifier.md'), 'utf8')
+  assert.match(agent, /^---\nname: delegate-verifier\n/)
+  assert.match(agent, /\nmainAgent: true\ntools: \[view_file, list_dir, find_by_name, grep_search, finish\]\n---\n/)
+  assert.doesNotMatch(agent, /\{\{/)
+  const hooks = JSON.parse(fs.readFileSync(path.join(cfg, 'hooks.json'), 'utf8'))
+  assert.deepEqual(Object.keys(hooks['agy-delegate-verifier']), ['PreToolUse'])
+  assert.match(hooks['agy-delegate-verifier'].PreToolUse[0].hooks[0].command, /pre-tool\.mjs'$/)
 })

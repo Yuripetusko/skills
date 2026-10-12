@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-// agy Stop hook: runs the lint and type-check gate (`jobs.mjs gate check`) each time agy wants to stop.
-// While the change adds findings it answers continue with them, up to ROUND_CAP times per job. After
-// that it lets agy stop with the verdict FAILED. Each check records the git tree it checked, and
+// agy Stop hook: runs the lint and type-check gate (`jobs.mjs gate check`) each time agy wants to stop,
+// and the verifier (verifier.mjs) once the gate is clean. While either finds problems it answers
+// continue with them, up to ROUND_CAP times per job. After that it lets agy stop with the verdict
+// FAILED. A verifier that gives no verdict also fails the job, with no continue: agy can't fix that.
+// Each check records the git tree it checked, and
 // agy-run.mjs takes a verdict only for the tree agy left: agy also stops when this hook crashes, prints
 // anything else or times out, so a later edit may have no check. The runner then checks once itself.
 // stdout carries the decision JSON and nothing else: the gate's output is piped.
 
 import path from 'node:path'
 import { snapshotTree } from '../gate.mjs'
-import { GATE_DEADLINE_S, isVerifier, jobDir, logLine, readCheck, readState, readStdin, ROUND_CAP, runGate, stateHash, writeState } from './job.mjs'
+import { isVerifier, jobDir, logLine, readState, readStdin, ROUND_CAP, stateHash, writeState } from './job.mjs'
+import { checkRound, coveredTree, VERIFIER_MODEL, verifierSummary } from './verifier.mjs'
 
 // agy stops on any decision other than "continue".
 const STOP = JSON.stringify({ decision: 'stop' })
@@ -19,6 +22,15 @@ const continueReason = (lines, attempt) =>
     ...lines,
     'Fix these without suppressing them: disable comments and casts count as findings.',
     ...(lines.some(l => l.includes('outside the baseline scope')) ? ['Undo your changes to the files listed as outside the baseline scope.'] : []),
+    'Then end with your report as before.',
+  ].join('\n')
+
+const verifierReason = (lines, attempt) =>
+  [
+    `An independent check of your change found problems. Fix them before you finish. This is round ${attempt} of ${ROUND_CAP}, and after round ${ROUND_CAP} the job fails with them listed.`,
+    ...lines,
+    'Fix the cause in the code. A cast, a disable comment or a new SAFETY: comment does not fix a finding.',
+    'If a finding is wrong, leave that code as it is and say why in your report.',
     'Then end with your report as before.',
   ].join('\n')
 
@@ -50,7 +62,7 @@ async function round(raw) {
   const finish = (verdict, action, fields, patch = {}) => {
     const h = { ...entry, verdict, action, ...fields }
     save({ verdict, history: [...(readState(dir).gate?.history ?? []), h], ...patch })
-    logLine(dir, { hook: 'Stop', decision: action, round: n, verdict, exit: h.exit ?? null, added: h.added ?? null })
+    logLine(dir, { hook: 'Stop', decision: action, round: n, verdict, exit: h.exit ?? null, added: h.added ?? null, verifier: h.verifier?.verdict ?? null })
   }
   if (stateHash(state) !== process.env.AGY_DELEGATE_STATE_SHA) {
     finish('error', 'stop', { lines: [] }, { reason: 'state.json changed during the run' })
@@ -65,21 +77,26 @@ async function round(raw) {
   // The tree the check starts from. A check that later reads edited files no longer matches the tree
   // agy leaves, so the runner checks again.
   const tree = snapshotTree(state.worktree, path.join(dir, 'gate'))
-  const r = await runGate(['check', '--job', dir, '--round', String(n)], { cwd: state.worktree, deadlineS: GATE_DEADLINE_S }).done
-  const c = readCheck(dir, n, r)
-  const fields = { tree, ...c.fields, ...(c.lines.length ? { lines: c.lines } : {}) }
+  const verifier = { agy: process.env.AGY_DELEGATE_AGY, model: process.env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL }
+  const c = await checkRound({ dir, worktree: state.worktree, n, verifier })
+  const fields = { tree: coveredTree(c, tree), ...c.fields, ...(c.verifier ? { verifier: verifierSummary(c.verifier) } : {}), ...(c.lines.length ? { lines: c.lines } : {}) }
   if (c.verdict === 'OK') {
-    // The verifier (agy-verifier-ticket.md) runs here, once the gate is clean.
     finish('OK', 'stop', fields, { reason: null })
     return STOP
   }
   if (c.verdict === 'FAILED') {
+    if (c.verifier?.noVerdict) {
+      finish('FAILED', 'stop', fields, { reason: c.reason })
+      return STOP
+    }
     const continues = state.gate?.continues ?? 0
     if (continues < ROUND_CAP) {
       finish('FAILED', 'continue', fields, { continues: continues + 1, reason: null })
-      return JSON.stringify({ decision: 'continue', reason: continueReason(c.lines, continues + 1) })
+      const reason = (c.verifier ? verifierReason : continueReason)(c.lines, continues + 1)
+      return JSON.stringify({ decision: 'continue', reason })
     }
-    finish('FAILED', 'stop', fields, { reason: `the change still adds findings after ${ROUND_CAP} rounds` })
+    const why = c.verifier ? `the verifier still finds problems after ${ROUND_CAP} rounds` : `the change still adds findings after ${ROUND_CAP} rounds`
+    finish('FAILED', 'stop', fields, { reason: why })
     return STOP
   }
   finish('error', 'stop', { ...c.fields, lines: c.lines }, { reason: c.reason })
