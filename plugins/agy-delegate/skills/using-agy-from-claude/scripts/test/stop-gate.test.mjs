@@ -222,10 +222,10 @@ test('with a gate, the agent prompt names the stop check and --print-timeout cov
   const agent = fs.readFileSync(path.join(ctx.job, 'agy', '.agents', 'agents', 'delegate-implementer.md'), 'utf8')
   assert.match(agent, /When you stop, this job runs lint and type-check/)
   const hooks = JSON.parse(fs.readFileSync(path.join(ctx.job, 'agy', '.agents', 'hooks.json'), 'utf8'))
-  // A 570 s gate check, a 330 s verifier run and 60 s for the diff and tree snapshots.
-  assert.equal(hooks['agy-delegate-job'].Stop[0].timeout, 960)
-  // 2 min of work plus 4 Stop hook runs of 960 s.
-  assert.match(r.stderr, /print-timeout 3960s/)
+  // A 570 s gate check, a 450 s verifier run and 60 s for the diff and tree snapshots.
+  assert.equal(hooks['agy-delegate-job'].Stop[0].timeout, 1080)
+  // 2 min of work plus 4 Stop hook runs of 1080 s.
+  assert.match(r.stderr, /print-timeout 4440s/)
 })
 
 test('a verifier run or a job without a gate leaves stop.mjs inert', () => {
@@ -361,7 +361,7 @@ test('verifier FAIL goes back to agy with its findings, and a PASS in the next r
   assert.equal(runs[0].role, 'verifier')
   const args = runs[0].args.join(' ')
   assert.match(args, new RegExp(`--add-dir ${path.join(ctx.job, 'agy-verifier')} --agent delegate-verifier --json-schema \\S+delegate-verifier\\.schema\\.json`))
-  assert.match(args, /--model gemini-3\.8-flash-medium .*--print-timeout 300s/)
+  assert.match(args, /--model gemini-3\.8-flash-medium .*--print-timeout 420s/)
   assert.ok(!runs[0].args.includes(path.join(ctx.job, 'agy')), 'the verifier must not load the implementer config')
   const input = path.join(ctx.job, 'verifier', 'input-1')
   assert.deepEqual(fs.readdirSync(input).sort(), ['brief.md', 'checklist.md', 'diff-numbered.txt', 'diff.patch', 'files.json', 'rules.json'])

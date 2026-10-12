@@ -19,8 +19,9 @@ export const CANARY = 'loaded'
 export const ROUND_CAP = 3
 // The gate check stops here. A whole-repo check took 147 s warm and about 370 s cold.
 export const GATE_DEADLINE_S = 570
-// The verifier's --print-timeout, and the kill timer after it.
-export const VERIFIER_PRINT_S = 300
+// The verifier's --print-timeout, and the kill timer after it. Runs took 62-118 s on small diffs and
+// 264 s once live.
+export const VERIFIER_PRINT_S = 420
 export const VERIFIER_DEADLINE_S = VERIFIER_PRINT_S + 30
 // The Stop hook's timeout in hooks.json: one gate check, one verifier run, and a minute for the diff
 // and tree snapshots, so stop.mjs records a verdict before agy kills it.
