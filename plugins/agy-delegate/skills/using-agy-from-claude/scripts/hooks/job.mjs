@@ -20,16 +20,26 @@ export const CANARY = 'loaded'
 export const ROUND_CAP = 3
 // The gate check stops here. A whole-repo check took 147 s warm and about 370 s cold.
 export const GATE_DEADLINE_S = 570
-// The verifier's shortest --print-timeout, and the kill timer after it. Runs took 62-118 s on small
-// diffs, 264 s once live, and up to 351 s on a 25-file diff.
+// The verifier's share of the budgets below. Runs took 62-118 s on small diffs, 264 s once live, and
+// up to 351 s on a 25-file diff.
 export const VERIFIER_PRINT_S = 420
-const VERIFIER_KILL_MARGIN_S = 30
+// The kill timer runs this long past --print-timeout, and SIGKILL follows its SIGTERM after the grace.
+export const VERIFIER_KILL_MARGIN_S = 30
+export const VERIFIER_KILL_GRACE_S = 5
 export const VERIFIER_DEADLINE_S = VERIFIER_PRINT_S + VERIFIER_KILL_MARGIN_S
-// A round's gate check and verifier run share this budget. The verifier gets what the check and its
-// inputs left, and never less than VERIFIER_PRINT_S: 866 s after the trial's 124 s check.
+// The runner's own check: gate and verifier end within this many seconds of the round's start.
 export const ROUND_BUDGET_S = GATE_DEADLINE_S + VERIFIER_DEADLINE_S
-export const verifierPrintS = spentS => Math.max(VERIFIER_PRINT_S, Math.floor(ROUND_BUDGET_S - VERIFIER_KILL_MARGIN_S - spentS))
-export const verifierDeadlineS = printS => printS + VERIFIER_KILL_MARGIN_S
+// What a Stop hook keeps after the verifier for the last tree snapshot, the verdict and state.json.
+export const HOOK_RESERVE_S = 30
+// With less time than this for --print-timeout, the verifier doesn't run and the round has no verdict.
+export const VERIFIER_MIN_PRINT_S = 60
+// The kill timer and --print-timeout of a verifier that must be gone `leftS` seconds from now, SIGKILL
+// grace included. A Stop hook passes what its timeout leaves, so after a 124 s gate check that is an
+// --print-timeout of about 890 s, and after 569 s of check and 60 s of snapshots about 386 s.
+export function verifierTimes(leftS) {
+  const deadlineS = Math.floor(leftS - VERIFIER_KILL_GRACE_S)
+  return { deadlineS, printS: deadlineS - VERIFIER_KILL_MARGIN_S }
+}
 // The Stop hook's timeout in hooks.json: one gate check, one verifier run, and a minute for the diff
 // and tree snapshots, so stop.mjs records a verdict before agy kills it.
 export const STOP_TIMEOUT_S = GATE_DEADLINE_S + VERIFIER_DEADLINE_S + 60

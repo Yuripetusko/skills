@@ -10,7 +10,16 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runDiff } from '../diff.mjs'
 import { snapshotTree } from '../gate.mjs'
-import { GATE_DEADLINE_S, isQuotaError, readCheck, runGate, verifierDeadlineS, verifierPrintS } from './job.mjs'
+import {
+  GATE_DEADLINE_S,
+  isQuotaError,
+  readCheck,
+  ROUND_BUDGET_S,
+  runGate,
+  VERIFIER_KILL_GRACE_S,
+  VERIFIER_MIN_PRINT_S,
+  verifierTimes,
+} from './job.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const VERIFIER_AGENT = 'delegate-verifier'
@@ -102,9 +111,9 @@ const real = p => {
 
 // Runs the verifier for round `n` and writes $JOB/verifier/result-<n>.json. `run` and `stateSha` are the
 // execution's AGY_DELEGATE_RUN and AGY_DELEGATE_STATE_SHA, which its hook needs to allow any call; the
-// runner's own process doesn't have them in its environment. `roundStart` is when the round's gate check
-// started, for the --print-timeout (verifierPrintS). `ctl.stop` is set while the nested agy runs, so a
-// caller's signal handler can end it. `say(text)` reports the start (model, pid) for
+// runner's own process doesn't have them in its environment. `deadlineAt` (ms) is when the verifier must
+// be gone, SIGKILL included; its kill timer and --print-timeout come from it (verifierTimes). `ctl.stop`
+// is set while the nested agy runs, so a caller's signal handler can end it. `say(text)` reports the start (model, pid) for
 // `delegate-jobs tail`. Every outcome other than a valid PASS or FAIL from a
 // run that exited 0 is a FAIL with `noVerdict: true` and the reason, never a PASS.
 export async function runVerifier({
@@ -115,7 +124,7 @@ export async function runVerifier({
   model,
   run,
   stateSha,
-  roundStart = Date.now(),
+  deadlineAt = Date.now() + ROUND_BUDGET_S * 1000,
   ctl = {},
   say = () => {},
 }) {
@@ -141,9 +150,13 @@ export async function runVerifier({
   }
   if (!diff.totals.files) return save({ verdict: 'PASS', noVerdict: false, reason: 'the change is empty, so there was nothing to check', input, treeBefore })
   if (!agy) return save({ reason: 'no agy binary was passed to the verifier', input })
-  const printS = verifierPrintS((Date.now() - roundStart) / 1000)
+  const leftS = Math.floor((deadlineAt - Date.now()) / 1000)
+  const times = verifierTimes(leftS)
+  const { printS } = times
+  if (printS < VERIFIER_MIN_PRINT_S)
+    return save({ reason: `only ${leftS}s were left for the verifier, too little for a ${VERIFIER_MIN_PRINT_S}s --print-timeout`, input, printS })
   // AGY_DELEGATE_VERIFIER_DEADLINE_S sets the kill timer alone, for tests.
-  const deadlineS = Number(process.env.AGY_DELEGATE_VERIFIER_DEADLINE_S) || verifierDeadlineS(printS)
+  const deadlineS = Number(process.env.AGY_DELEGATE_VERIFIER_DEADLINE_S) || times.deadlineS
 
   const message = path.join(vdir, `input-${n}.jsonl`)
   fs.writeFileSync(message, `${JSON.stringify({ event: 'user', message: { role: 'user', content: briefFor(worktree, input, diff) } })}\n`)
@@ -184,7 +197,7 @@ export async function runVerifier({
     }
     ctl.stop = () => {
       kill('SIGTERM')
-      setTimeout(() => kill('SIGKILL'), 5000).unref()
+      setTimeout(() => kill('SIGKILL'), VERIFIER_KILL_GRACE_S * 1000).unref()
     }
     const timer = setTimeout(() => ((timedOut = true), ctl.stop()), deadlineS * 1000)
     child.on('error', error => (clearTimeout(timer), resolve({ error: error.message })))
@@ -279,10 +292,11 @@ export function verifierLine(v) {
 
 // One round: the gate check, then the verifier when the gate is clean. Returns the round verdict
 // (OK only for a clean gate and a verifier PASS), the gate's fields, the lines to show, and the verifier
-// result. `ctl.stop` ends whichever child runs, for the caller's signal handler. `say(text)` writes the
-// round's progress lines for `delegate-jobs tail`: each start and each result.
-export async function checkRound({ dir, worktree, n, verifier, ctl = {}, say = () => {} }) {
-  const roundStart = Date.now()
+// result. `deadlineAt` (ms) is when the verifier must be gone: a Stop hook passes its own timeout less
+// HOOK_RESERVE_S, the runner ROUND_BUDGET_S from the round's start. `ctl.stop` ends whichever child
+// runs, for the caller's signal handler. `say(text)` writes the round's progress lines for
+// `delegate-jobs tail`: each start and each result.
+export async function checkRound({ dir, worktree, n, verifier, deadlineAt = Date.now() + ROUND_BUDGET_S * 1000, ctl = {}, say = () => {} }) {
   say(`lint and type-check started (stopped after ${GATE_DEADLINE_S}s)`)
   const gate = runGate(['check', '--job', dir, '--round', String(n)], { cwd: worktree, deadlineS: GATE_DEADLINE_S })
   ctl.stop = gate.stop
@@ -291,7 +305,7 @@ export async function checkRound({ dir, worktree, n, verifier, ctl = {}, say = (
   const c = readCheck(dir, n, r)
   say(gateLine(c))
   if (c.verdict !== 'OK') return { ...c, verifier: null }
-  const v = await runVerifier({ dir, worktree, n, ...verifier, roundStart, ctl, say })
+  const v = await runVerifier({ dir, worktree, n, ...verifier, deadlineAt, ctl, say })
   say(verifierLine(v))
   const lines = findingLines(v)
   if (v.verdict === 'PASS') return { verdict: 'OK', fields: c.fields, lines: [], verifier: v }
