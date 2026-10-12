@@ -1,0 +1,12 @@
+{
+  "conversationId": "00000000-0000-4000-8000-000000000001",
+  "workspacePaths": ["{{agyDir}}", "{{worktree}}"],
+  "transcriptPath": "{{agyDir}}/../transcript.jsonl",
+  "artifactDirectoryPath": "{{agyDir}}/../artifacts",
+  "modelName": "gemini-3.8-flash-low",
+  "toolCall": {
+    "name": "write_to_file",
+    "args": { "TargetFile": "{{worktree}}/docs/notes.md", "CodeContent": "notes\n", "Overwrite": false }
+  },
+  "stepIdx": 11
+}

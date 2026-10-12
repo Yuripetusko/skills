@@ -32,8 +32,26 @@ The implementers take header lines at the top of the brief:
 - `install: yes`: runs the repo's `setup-worktree` script, or a frozen install.
 - `commit: <message>`: commits on the Claude side once the change stays inside `paths`.
 
-Tests, lint and type-check stay with the caller, who should never take the delegate's own "tests
-pass" at face value.
+Tests stay with the caller, who should never take the delegate's own "tests pass" at face value. So
+do lint and type-check, unless the target repo has a gate config.
+
+**Lint and type-check gate for agy.** When the target repo commits `.agents/delegate-gate.json`,
+`agy-implementer` records lint and type-check findings before agy starts. A Stop hook checks again
+each time agy tries to finish and sends any new findings back to agy, up to 3 times. Once lint and
+type-check are clean, a second, read-only agy run checks the diff against a fixed checklist (true
+`SAFETY:` comments, no behaviour change to fit a type, no cast laundering, no copied helpers, kept
+`unknown` return types, no weakened tests) and the repo's `AGENTS.md` files. Its findings go back
+to agy the same way. If findings remain, or the gate or the verifier can't give a verdict, the job
+exits 17 (`gate`). The relay's report leads with the gate verdict: `GATE OK`, `GATE FAILED`,
+`GATE ERROR` or `GATE: not configured`. The config format is in
+[gate-config.md](plugins/agy-delegate/skills/using-agy-from-claude/references/gate-config.md).
+
+**These gates are opinionated.** They grew out of one pnpm and turbo monorepo that uses oxlint and
+`tsc -b`, so the gate parses those two tools' output, and the agy job rules block what went wrong
+there: git state changes, other AI CLIs, dependency installs, writes outside `paths:`, and edits to
+ticket files. The commands come from each repo's config, but other linters, other type checkers and
+switching individual rules off aren't supported yet. Pull requests that make them configurable are
+welcome.
 
 **Permissions.** agy runs with `--dangerously-skip-permissions`, and Codex write jobs use its
 `workspace-write` sandbox, the same trust as running Claude in auto mode with whole-project access.
@@ -58,11 +76,16 @@ node ~/.claude/delegate-jobs/jobs.mjs cancel <job>
 For the orchestrating session itself, start the Monitor tool on
 `delegate-jobs tail --next -f --every 2m` right after dispatching. It sends one summary line every two
 minutes and then the job's outcome, which keeps the orchestrator's context small. Drop `--every` to
-get every step.
+get every step. An agy job with a gate also prints a few lines per round as its Stop hook starts and
+finishes each lint and type-check run and verifier run, so a long check doesn't look like a stall. The
+lines give the findings added, the verifier's model and any timeout, and `--every` doesn't condense
+them. `jobs` shows the verifier verdict beside the gate verdict.
 
-`jobs.mjs` is shared by both plugins, with an identical copy in each; check them with
-`cmp plugins/agy-delegate/skills/using-agy-from-claude/scripts/jobs.mjs plugins/codex-delegate/skills/using-codex-from-claude/scripts/jobs.mjs`.
-Each new job refreshes the copy at `~/.claude/delegate-jobs/jobs.mjs`.
+`jobs.mjs`, `clean-line.mjs`, `diff.mjs` and `gate.mjs` are shared by both plugins, with an identical copy in each; check them with
+`cmp plugins/agy-delegate/skills/using-agy-from-claude/scripts/jobs.mjs plugins/codex-delegate/skills/using-codex-from-claude/scripts/jobs.mjs`
+(and the same for `clean-line.mjs`, `diff.mjs` and `gate.mjs`). Each new job refreshes the copies in `~/.claude/delegate-jobs/`.
+`delegate-jobs diff --job <job>` writes a numbered diff, the changed files and the applicable
+`AGENTS.md` files for a job's change; `--pr <n>` does the same for a GitHub PR.
 
 **Install.** Add the marketplace from this checkout, then install both plugins:
 
