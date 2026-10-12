@@ -77,8 +77,8 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   the job's environment its hook denies every call, `finish` included. Its inputs are in
   `<dir>/verifier/input-<n>/`, its verdict in `<dir>/verifier/result-<n>.json`, and its hook
   decisions in `hook.log` with `role: verifier`. It checks conventions, not a full review: the
-  caller still reviews the change. It took 62 to 118 s on small diffs, and 264 s once live. Its
-  `--print-timeout` is 420 s.
+  caller still reviews the change. It took 62 to 118 s on small diffs, 264 s once live, and 56 to
+  351 s on a 25-file diff. Its `--print-timeout` is 420 s.
 - agy also stops mid-job, for example at a `wait` step while its own commands run. When the Stop
   input says `fullyIdle: false`, the hook runs no check and spends no round.
 - Each check records the git tree it checked. After agy exits, the runner takes a verdict only from
@@ -137,10 +137,15 @@ them in the saved brief, where agy sees `paths:` too.
 
 ## 2. Model and timeout
 
-- **Model.** Default `gemini-3.8-flash-high`. Use `gemini-3.8-flash-medium` when the brief calls the
-  edit trivial, and `gemini-3.1-pro-high` when it calls for harder reasoning. Pass whatever the brief
-  names; the runner checks it against `agy models` (exit 14 lists the valid ones). The model id
-  carries the effort, so there is no separate effort flag.
+- **Model.** Default `gemini-3.8-flash-medium`. A gated trial ran one 25-file refactor once on
+  each of `gemini-3.8-flash-medium`, `gemini-3.8-flash-high` and `gemini-3.1-pro-high`. All three
+  needed 2 rounds and ended with nearly the same diff. flash-high used 36% more tokens and
+  silenced one type error with `@ts-expect-error`. pro-high used 84% more tokens and about 10 more
+  minutes. Pass whatever the brief names; the runner checks it against `agy models` (exit 14 lists
+  the valid ones).
+- **Effort.** The model id carries it. agy's `--effort` works only with a bare family id such as
+  `gemini-3.8-flash`, which `agy models` doesn't list. With a suffixed id agy exits with "conflicts",
+  and flash rejects `xhigh` and `max`. The runner has no effort option.
 - **Timeout.** Default `30m`, capped at `110m`, so agy stops before the 2 h Bash limit.
 
 ## 3. Implement mode: prepare the worktree
