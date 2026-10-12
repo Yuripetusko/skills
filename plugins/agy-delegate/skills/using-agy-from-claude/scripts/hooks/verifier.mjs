@@ -14,7 +14,7 @@ import { GATE_DEADLINE_S, readCheck, runGate, VERIFIER_DEADLINE_S, VERIFIER_PRIN
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const VERIFIER_AGENT = 'delegate-verifier'
-// model-trial-ticket.md sets the default. AGY_DELEGATE_VERIFIER_MODEL overrides it.
+// flash-high caught the same planted problems in 1.8x the time. AGY_DELEGATE_VERIFIER_MODEL overrides it.
 export const VERIFIER_MODEL = 'gemini-3.8-flash-medium'
 // `finish` carries the --json-schema result. Without it in the list, agy 1.3.3 returned no
 // structured_output and the run took three times as long.

@@ -20,7 +20,8 @@ import { checkRound, coveredTree, VERIFIER_AGENT, VERIFIER_MODEL, verifierSummar
 import { updateMeta } from './jobs.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const DEFAULT_MODEL = 'gemini-3.8-flash-high'
+// In a gated trial, flash-high and pro-high made nearly the same diff with 36% and 84% more tokens.
+const DEFAULT_MODEL = 'gemini-3.8-flash-medium'
 const DEFAULT_TIMEOUT = '30m'
 const MAX_TIMEOUT_S = 110 * 60 // the relay's background Bash call dies at 2 h
 const GUARD_S = 120 // wall clock past --print-timeout before the runner kills agy itself
