@@ -228,6 +228,37 @@ test('verifier role: reads inside the worktree and input dir pass, writes, comma
   )
 })
 
+test('verifier role: MCP, unknown tools and reads without a path are denied', () => {
+  const ctx = makeJob()
+  const input = path.join(ctx.job, 'verifier', 'input-1')
+  fs.mkdirSync(input, { recursive: true })
+  const env = { AGY_DELEGATE_ROLE: 'verifier', AGY_DELEGATE_VERIFIER_INPUT: input }
+  const call = (name, args) => runHook('pre-tool.mjs', JSON.stringify({ toolCall: { name, args } }), ctx, env)
+  // An MCP write names no path the write rules know.
+  const mcp = { ServerName: 'filesystem', ToolName: 'write_file', Arguments: { path: path.join(ctx.worktree, 'x.ts'), content: 'x' } }
+  assert.equal(call('call_mcp_tool', mcp).decision, 'deny')
+  assert.equal(call('call_mcp_tool', { ServerName: 'docs', ToolName: 'search' }).decision, 'deny')
+  assert.equal(call('manage_task', { Action: 'list' }).decision, 'deny')
+  assert.equal(call('read_url_content', { Url: 'https://example.com' }).decision, 'deny')
+  assert.equal(call('view_file', {}).decision, 'deny')
+  assert.equal(call('grep_search', { Query: 'x' }).decision, 'deny')
+  const log = hookLog(ctx.job)
+  assert.deepEqual(log.map(e => e.rule), ['verifier-read-only', 'verifier-read-only', 'verifier-read-only', 'verifier-read-only', 'verifier-no-path', 'verifier-no-path'])
+  assert.equal(log[0].target, 'filesystem/write_file')
+})
+
+test('verifier role: without the job env, its input dir or a matching state hash, finish is denied too', () => {
+  const ctx = makeJob()
+  const input = path.join(ctx.job, 'verifier', 'input-1')
+  fs.mkdirSync(input, { recursive: true })
+  const finish = env => runHook('pre-tool.mjs', JSON.stringify({ toolCall: { name: 'finish', args: { verdict: 'PASS', findings: [] } } }), ctx, env)
+  assert.deepEqual(finish({ AGY_DELEGATE_ROLE: 'verifier', AGY_DELEGATE_VERIFIER_INPUT: input }), { decision: 'allow' })
+  assert.equal(finish({ AGY_DELEGATE_ROLE: 'verifier' }).decision, 'deny')
+  assert.equal(finish({ AGY_DELEGATE_ROLE: 'verifier', AGY_DELEGATE_VERIFIER_INPUT: input, AGY_DELEGATE_STATE_SHA: '' }).decision, 'deny')
+  assert.equal(finish({ AGY_DELEGATE_ROLE: 'verifier', AGY_DELEGATE_VERIFIER_INPUT: input, AGY_DELEGATE_JOB: '' }).decision, 'deny')
+  assert.equal(finish({ AGY_DELEGATE_ROLE: 'verifier', AGY_DELEGATE_VERIFIER_INPUT: input, AGY_DELEGATE_JOB: '/nonexistent' }).decision, 'deny')
+})
+
 test('pre-invocation writes the canary once per execution; the verifier role writes none', () => {
   const ctx = makeJob()
   const input = JSON.stringify({ conversationId: 'c1', modelName: 'gemini-3.8-flash-low', invocationNum: 0 })

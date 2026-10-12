@@ -19,8 +19,11 @@
 // FAKE_KILL_STOP=final  kill the Stop hooks after the answer within 1 ms, before they can write anything
 // FAKE_VERIFIER     for `--agent delegate-verifier` runs: comma-separated answer per gate round (the
 //                   input dir's number), the last one repeating. PASS, FAIL (one finding), none (no
-//                   structured output), invalid, hang, crash (exit 1, no result), write (a write call
-//                   the hook should block, then PASS), scribble (edits the worktree, then PASS)
+//                   structured output), invalid, hang, crash (exit 1, no result), write and mcp (a
+//                   write call or an MCP write the hook should block, then PASS), scribble (edits
+//                   the worktree, then PASS), pass-exit1 and pass-kill (a PASS result, then exit 1 or
+//                   SIGKILL). Like a model that saw nothing, it answers FAIL when its hook denies
+//                   the read of diff-numbered.txt or the file is missing.
 // FAKE_VERIFIER_LOG file that gets one JSON line per verifier run: round, cwd, args and env
 // Like agy 1.3.3, a Stop hook that exits non-zero, prints no JSON or times out lets the run stop, and
 // the 11th consecutive continue is ignored. Each Stop answer is logged as a `fake_stop_hook` event.
@@ -94,18 +97,29 @@ if (opt('--agent') === 'delegate-verifier') {
   const answer = answers[Math.min(round, answers.length) - 1]
   if (env.FAKE_VERIFIER_LOG)
     fs.appendFileSync(env.FAKE_VERIFIER_LOG, `${JSON.stringify({ round, cwd, args: argv, role: env.AGY_DELEGATE_ROLE, input, answer })}\n`)
+  // Returns true when every hook allowed the call.
   const tool = (name, args) => {
     const decisions = handlers('PreToolUse').map(h => callHook(h, { ...common, toolCall: { name, args } }))
-    out({ event: 'step_update', step_update: { step_index: 1, state: decisions.some(d => d.decision !== 'allow') ? 'ERROR' : 'DONE', step_type: 'tool', tool_name: name, tool_info: { name, parameters: args } } })
+    const allowed = decisions.every(d => d.decision === 'allow')
+    out({ event: 'step_update', step_update: { step_index: 1, state: allowed ? 'DONE' : 'ERROR', step_type: 'tool', tool_name: name, tool_info: { name, parameters: args } } })
+    return allowed
   }
-  tool('view_file', { AbsolutePath: path.join(input, 'diff-numbered.txt') })
+  const diffFile = path.join(input, 'diff-numbered.txt')
+  const read = tool('view_file', { AbsolutePath: diffFile }) && fs.existsSync(diffFile)
   if (answer === 'write') tool('write_to_file', { TargetFile: path.join(cwd, 'verifier-was-here.txt'), CodeContent: 'x' })
+  if (answer === 'mcp') tool('call_mcp_tool', { ServerName: 'filesystem', ToolName: 'write_file', Arguments: { path: path.join(cwd, 'verifier-was-here.txt'), content: 'x' } })
   if (answer === 'scribble') fs.writeFileSync(path.join(cwd, 'verifier-was-here.txt'), 'x')
   if (answer === 'hang') sleep(3600)
   if (answer === 'crash') process.exit(1)
   const finding = { file: 'pkg/src/b.ts', line: 1, rule: 'SAFETY comments are true', why: 'Nothing checks the value before the cast.', fix: 'Narrow it with a type guard first.' }
-  const structured = { PASS: { verdict: 'PASS', findings: [] }, FAIL: { verdict: 'FAIL', findings: [finding] }, invalid: { verdict: 'MAYBE' } }[answer] ?? (answer === 'none' ? undefined : { verdict: 'PASS', findings: [] })
+  const unread = { file: 'diff-numbered.txt', line: 0, rule: 'input', why: 'The input could not be read.', fix: 'Let the verifier read its input.' }
+  const structured = !read
+    ? { verdict: 'FAIL', findings: [unread] }
+    : ({ PASS: { verdict: 'PASS', findings: [] }, FAIL: { verdict: 'FAIL', findings: [finding] }, invalid: { verdict: 'MAYBE' } }[answer] ??
+      (answer === 'none' ? undefined : { verdict: 'PASS', findings: [] }))
   out({ event: 'result', result: { status: 'SUCCESS', response: JSON.stringify(structured ?? 'no json'), duration_seconds: 1, conversation_id: 'fake-verifier', ...(structured ? { structured_output: structured } : {}) } })
+  if (answer === 'pass-exit1') process.exit(1)
+  if (answer === 'pass-kill') process.kill(process.pid, 'SIGKILL')
   process.exit(0)
 }
 if (env.FAKE_DELAY_START) sleep(env.FAKE_DELAY_START)

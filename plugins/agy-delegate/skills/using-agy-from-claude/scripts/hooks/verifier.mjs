@@ -100,10 +100,22 @@ const real = p => {
   }
 }
 
-// Runs the verifier for round `n` and writes $JOB/verifier/result-<n>.json. `ctl.stop` is set while the
-// nested agy runs, so a caller's signal handler can end it. Every outcome other than a valid PASS or
-// FAIL is a FAIL with `noVerdict: true` and the reason, never a PASS.
-export async function runVerifier({ dir, worktree, n, agy, model, deadlineS = Number(process.env.AGY_DELEGATE_VERIFIER_DEADLINE_S) || VERIFIER_DEADLINE_S, ctl = {} }) {
+// Runs the verifier for round `n` and writes $JOB/verifier/result-<n>.json. `run` and `stateSha` are the
+// execution's AGY_DELEGATE_RUN and AGY_DELEGATE_STATE_SHA, which its hook needs to allow any call; the
+// runner's own process doesn't have them in its environment. `ctl.stop` is set while the nested agy
+// runs, so a caller's signal handler can end it. Every outcome other than a valid PASS or FAIL from a
+// run that exited 0 is a FAIL with `noVerdict: true` and the reason, never a PASS.
+export async function runVerifier({
+  dir,
+  worktree,
+  n,
+  agy,
+  model,
+  run,
+  stateSha,
+  deadlineS = Number(process.env.AGY_DELEGATE_VERIFIER_DEADLINE_S) || VERIFIER_DEADLINE_S,
+  ctl = {},
+}) {
   const started = Date.now()
   const vdir = path.join(dir, 'verifier')
   fs.mkdirSync(vdir, { recursive: true })
@@ -139,7 +151,14 @@ export async function runVerifier({ dir, worktree, n, agy, model, deadlineS = Nu
     const child = spawn(agy, args, {
       cwd: worktree, // never the hook's cwd, which holds the implementer's hooks.json
       detached: true,
-      env: { ...process.env, AGY_DELEGATE_ROLE: 'verifier', AGY_DELEGATE_VERIFIER_INPUT: input },
+      env: {
+        ...process.env,
+        AGY_DELEGATE_JOB: dir,
+        AGY_DELEGATE_RUN: run ?? '',
+        AGY_DELEGATE_STATE_SHA: stateSha ?? '',
+        AGY_DELEGATE_ROLE: 'verifier',
+        AGY_DELEGATE_VERIFIER_INPUT: input,
+      },
       stdio: [fs.openSync(message, 'r'), fs.openSync(events, 'w'), fs.openSync(stderr, 'w')],
     })
     const kill = sig => {
@@ -172,7 +191,7 @@ export async function runVerifier({ dir, worktree, n, agy, model, deadlineS = Nu
   const init = parsed.find(e => e.event === 'init')?.init
   const result = parsed.findLast(e => e.event === 'result')?.result
   const errText = fs.existsSync(stderr) ? fs.readFileSync(stderr, 'utf8') : ''
-  const run = {
+  const info = {
     input,
     treeBefore,
     treeAfter,
@@ -180,9 +199,12 @@ export async function runVerifier({ dir, worktree, n, agy, model, deadlineS = Nu
     usage: result?.usage ?? null,
     tools: parsed.filter(e => e.step_update?.step_type === 'tool' && e.step_update.state !== 'ACTIVE').length,
   }
-  const fail = reason => save({ ...run, reason })
+  const fail = reason => save({ ...info, reason })
   if (timedOut) return fail(`the verifier ran past ${deadlineS}s and was stopped`)
   if (outcome.error) return fail(`agy could not start: ${outcome.error}`)
+  // A result streamed before a crash or a kill doesn't count.
+  if (outcome.code !== 0 || outcome.signal)
+    return fail(`the verifier exited ${outcome.signal ?? outcome.code} ${result ? 'after streaming a result' : 'without a result'}: ${errText.trim().split('\n').at(-1) || 'no detail'}`)
   if (treeAfter !== treeBefore) return fail('the worktree changed while the verifier ran')
   if (init && real(init.cwd) !== real(worktree)) return fail(`the verifier bound to ${init.cwd}, not the worktree`)
   if (/print timeout after/i.test(errText)) return fail(`the verifier hit its --print-timeout of ${VERIFIER_PRINT_S}s`)
@@ -192,7 +214,7 @@ export async function runVerifier({ dir, worktree, n, agy, model, deadlineS = Nu
   if (problem) return fail(`the verifier produced no valid verdict: ${problem}`)
   const { verdict, findings } = result.structured_output
   // A PASS that lists findings counts as a FAIL: the findings are concrete.
-  return save({ ...run, verdict: findings.length ? 'FAIL' : verdict, findings, noVerdict: false, reason: verdict === 'PASS' && findings.length ? 'PASS with findings counts as FAIL' : null })
+  return save({ ...info, verdict: findings.length ? 'FAIL' : verdict, findings, noVerdict: false, reason: verdict === 'PASS' && findings.length ? 'PASS with findings counts as FAIL' : null })
 }
 
 // One line per finding, clipped to MAX_LINES.

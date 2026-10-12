@@ -354,28 +354,33 @@ export function decide(call, state) {
   return { decision: 'allow', target: String(target) }
 }
 
-const VERIFIER_WRITE = { id: 'verifier-read-only', why: 'the verifier only reads' }
+const VERIFIER_ONLY = { id: 'verifier-read-only', why: 'the verifier may only view and search files and call finish' }
+const VERIFIER_NO_PATH = { id: 'verifier-no-path', why: 'the verifier must name the file or directory it reads' }
 const VERIFIER_OUTSIDE = { id: 'verifier-outside', why: 'the verifier reads only the worktree, its input dir and its config dir' }
-const READ_TARGET = ['AbsolutePath', 'SearchPath', 'SearchDirectory', 'DirectoryPath']
+// The verifier's read tools and the argument that holds each one's path, as agy 1.3.3 sends them.
+const VERIFIER_READS = { view_file: 'AbsolutePath', list_dir: 'DirectoryPath', find_by_name: 'SearchDirectory', grep_search: 'SearchPath' }
 const within = (file, root) => file === root || file.startsWith(root.endsWith('/') ? root : `${root}/`)
 
-// The nested verifier run: every write and every command is denied, and so is a read outside `roots`.
-// `finish`, which carries its verdict, and any call without a path are allowed.
+// The nested verifier run: only the four read tools, each on a path inside `roots`, and `finish`, which
+// carries its verdict. Everything else is denied: commands, writes, MCP and any tool agy adds.
 export function decideVerifier(call, roots) {
   const args = call?.args ?? {}
-  if (call?.name === 'run_command') return blocked(VERIFIER_WRITE, String(args.CommandLine ?? ''))
-  if (isWrite(call)) return blocked(VERIFIER_WRITE, String(args.TargetFile ?? ''))
-  const key = READ_TARGET.find(k => typeof args[k] === 'string' && args[k])
-  if (!key) return { decision: 'allow', target: '' }
+  if (call?.name === 'finish') return { decision: 'allow', target: '' }
+  const key = VERIFIER_READS[call?.name]
+  if (!key) return blocked(VERIFIER_ONLY, call?.name === 'call_mcp_tool' ? mcpTarget(args) : String(args.CommandLine ?? args.TargetFile ?? call?.name ?? ''))
+  if (typeof args[key] !== 'string' || !args[key]) return blocked(VERIFIER_NO_PATH, '')
   const given = args[key].replace(/^file:\/\//, '')
   const abs = path.isAbsolute(given) ? resolveTarget(given) : resolveTarget(`${roots[0]}/${given}`)
   if (abs == null || !roots.some(r => within(abs, r))) return blocked(VERIFIER_OUTSIDE, given)
   return { decision: 'allow', target: abs }
 }
 
+// The worktree, the round's input dir and the verifier's config dir. A run without its input dir is
+// broken, so every call is denied, `finish` included.
 function verifierRoots(dir, state) {
-  const roots = [state.worktree, process.env.AGY_DELEGATE_VERIFIER_INPUT, path.join(dir, 'agy-verifier')].filter(Boolean)
-  return roots.map(r => resolveTarget(r) ?? r)
+  const input = process.env.AGY_DELEGATE_VERIFIER_INPUT
+  if (!input) throw new Error('AGY_DELEGATE_VERIFIER_INPUT is not set')
+  return [state.worktree, input, path.join(dir, 'agy-verifier')].map(r => resolveTarget(r) ?? r)
 }
 
 async function main() {
@@ -398,8 +403,8 @@ async function main() {
     console.log(JSON.stringify(d.decision === 'deny' ? { decision: 'deny', reason: d.reason } : { decision: 'allow' }))
   } catch (error) {
     // Fail closed for the calls the rules cover, open for the rest. The verifier's rules cover every
-    // call except `finish`.
-    const covered = !call || call.name === 'run_command' || GUARDED_TOOLS.has(call.name) || isWrite(call) || (role.role && call.name !== 'finish')
+    // call, `finish` included: a verdict from a run whose reads were all denied must not count.
+    const covered = Boolean(role.role) || !call || call.name === 'run_command' || GUARDED_TOOLS.has(call.name) || isWrite(call)
     const reason = `Blocked by job rules: the rule check failed (${error.message}).`
     console.log(JSON.stringify(covered ? { decision: 'deny', reason } : { decision: 'allow' }))
     try {

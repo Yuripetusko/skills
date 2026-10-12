@@ -751,7 +751,7 @@ async function run(opts) {
       let settled = null
       if (gate.configured) {
         try {
-          settled = await settleGate(dir, worktree, runId, exit === EXIT.ok, { agy, model: verifierModel })
+          settled = await settleGate(dir, worktree, runId, exit === EXIT.ok, { agy, model: verifierModel, run: runId, stateSha })
         } catch (error) {
           log(`gate: could not settle the verdict: ${error.message}`)
         }

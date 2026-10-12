@@ -69,12 +69,16 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   `delegate-verifier` agent on `gemini-3.8-flash-medium`, configured in `<dir>/agy-verifier/`. It
   reads the job's numbered diff, the brief, the applicable `AGENTS.md` files and
   [prompts/verifier-checklist.md](prompts/verifier-checklist.md), and returns PASS or FAIL with
-  `file:line` findings. A FAIL goes back to agy like gate findings and shares the 3 rounds. A run
-  that gives no valid verdict (timeout, crash, invalid result, a changed worktree) fails the round,
-  and the job exits 17 without sending agy back. Its inputs are in `<dir>/verifier/input-<n>/`, its
-  verdict in `<dir>/verifier/result-<n>.json`, and its hook decisions in `hook.log` with
-  `role: verifier`. It checks conventions, not a full review: the caller still reviews the change.
-  It took 62 to 118 s on small diffs, and 264 s once live. Its `--print-timeout` is 420 s.
+  `file:line` findings. Its hook allows only `view_file`, `list_dir`, `find_by_name` and
+  `grep_search` on the worktree, its input dir and its config dir, plus `finish`; MCP and every other
+  tool are denied. A FAIL goes back to agy like gate findings and shares the 3 rounds. A run that
+  gives no valid verdict (timeout, a non-zero exit or a kill even after a streamed result, an invalid
+  result, a changed worktree) fails the round, and the job exits 17 without sending agy back. Without
+  the job's environment its hook denies every call, `finish` included. Its inputs are in
+  `<dir>/verifier/input-<n>/`, its verdict in `<dir>/verifier/result-<n>.json`, and its hook
+  decisions in `hook.log` with `role: verifier`. It checks conventions, not a full review: the
+  caller still reviews the change. It took 62 to 118 s on small diffs, and 264 s once live. Its
+  `--print-timeout` is 420 s.
 - agy also stops mid-job, for example at a `wait` step while its own commands run. When the Stop
   input says `fullyIdle: false`, the hook runs no check and spends no round.
 - Each check records the git tree it checked. After agy exits, the runner takes a verdict only from

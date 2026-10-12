@@ -77,7 +77,8 @@ async function round(raw) {
   // The tree the check starts from. A check that later reads edited files no longer matches the tree
   // agy leaves, so the runner checks again.
   const tree = snapshotTree(state.worktree, path.join(dir, 'gate'))
-  const verifier = { agy: process.env.AGY_DELEGATE_AGY, model: process.env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL }
+  const env = process.env
+  const verifier = { agy: env.AGY_DELEGATE_AGY, model: env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL, run, stateSha: env.AGY_DELEGATE_STATE_SHA }
   const c = await checkRound({ dir, worktree: state.worktree, n, verifier })
   const fields = { tree: coveredTree(c, tree), ...c.fields, ...(c.verifier ? { verifier: verifierSummary(c.verifier) } : {}), ...(c.lines.length ? { lines: c.lines } : {}) }
   if (c.verdict === 'OK') {

@@ -9,6 +9,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
+import { stateHash, writeState } from '../hooks/job.mjs'
+import { runVerifier, writeVerifierConfig } from '../hooks/verifier.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const RUNNER = path.join(HERE, '..', 'agy-run.mjs')
@@ -385,7 +387,9 @@ test('verifier FAIL in every round: the cap allows the stop and exit 17 lists th
 for (const [answer, why] of [
   ['none', /no valid verdict: no structured result/],
   ['invalid', /no valid verdict: verdict is "MAYBE"/],
-  ['crash', /ended without a result/],
+  ['crash', /exited 1 without a result/],
+  ['pass-exit1', /exited 1 after streaming a result/],
+  ['pass-kill', /exited SIGKILL after streaming a result/],
   ['hang', /ran past 2s and was stopped/],
   ['scribble', /the worktree changed while the verifier ran/],
 ]) {
@@ -413,6 +417,51 @@ test('the verifier hook blocks a write: hook.log shows no allowed write and the 
   // The implementer's own list stays clean.
   assert.match(r.report, /- blocked by job rules: none/)
   assert.equal(r.meta.blocked, 0)
+})
+
+test('the verifier hook blocks an MCP write, which names no path the write rules check', () => {
+  const ctx = changed()
+  const r = run(ctx, verified('0', 'mcp'))
+  assert.equal(r.status, 0, r.report)
+  const log = fs.readFileSync(path.join(ctx.job, 'hook.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+  const mine = log.filter(e => e.role === 'verifier')
+  assert.deepEqual(mine.map(e => [e.tool, e.decision, e.rule ?? null]), [['view_file', 'allow', null], ['call_mcp_tool', 'deny', 'verifier-read-only']])
+  assert.equal(mine[1].target, 'filesystem/write_file')
+  assert.ok(!fs.existsSync(path.join(ctx.repo, 'verifier-was-here.txt')))
+})
+
+test("the runner's own check gives the verifier the job env, so its reads pass and a PASS counts", () => {
+  const ctx = changed()
+  // No Stop hook fires, so only the runner runs the gate and the verifier. The fake verifier answers
+  // FAIL when its hook denies the read of its input.
+  const r = run(ctx, { env: { ...verified('0', 'PASS').env, FAKE_STOP_HOOK: '0' } })
+  assert.equal(r.status, 0, r.report)
+  assert.match(r.report, /- round 1: OK, 0 added, 0 removed, \d+s, verifier PASS in \d+s, checked by the runner after agy exited/)
+  const log = fs.readFileSync(path.join(ctx.job, 'hook.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+  const read = log.find(e => e.role === 'verifier' && e.tool === 'view_file')
+  assert.equal(read.decision, 'allow')
+  assert.equal(read.run, r.state.gate.run)
+  assert.match(read.target, /verifier\/input-1\/diff-numbered\.txt$/)
+})
+
+test('runVerifier: without the job env its hook denies the input read, and no PASS comes back', async () => {
+  const ctx = setup()
+  fs.writeFileSync(path.join(ctx.repo, 'pkg', 'src', 'b.ts'), 'export const b = 1\n')
+  const state = { job: ctx.job, worktree: ctx.repo, mode: 'implement', readOnly: false, paths: ['pkg/src/**'], agent: 'delegate-implementer' }
+  writeState(ctx.job, state)
+  writeVerifierConfig(ctx.job, { model: 'gemini-3.8-flash-medium', worktree: ctx.repo })
+  process.env.FAKE_VERIFIER = 'PASS'
+  try {
+    const base = { dir: ctx.job, worktree: ctx.repo, agy: FAKE_AGY, model: 'gemini-3.8-flash-medium', run: 'run-1' }
+    const broken = await runVerifier({ ...base, n: 1, stateSha: undefined })
+    assert.equal(broken.verdict, 'FAIL')
+    const log = fs.readFileSync(path.join(ctx.job, 'hook.log'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+    assert.deepEqual(log.map(e => [e.role, e.tool, e.decision, e.rule]), [['verifier', 'view_file', 'deny', 'state-changed']])
+    const good = await runVerifier({ ...base, n: 2, stateSha: stateHash(state) })
+    assert.equal(good.verdict, 'PASS', good.reason)
+  } finally {
+    delete process.env.FAKE_VERIFIER
+  }
 })
 
 test('a FAILED gate check runs no verifier', () => {
