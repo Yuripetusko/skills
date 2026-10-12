@@ -29,7 +29,7 @@ const verifierReason = (lines, attempt) =>
   [
     `An independent check of your change found problems. Fix them before you finish. This is round ${attempt} of ${ROUND_CAP}, and after round ${ROUND_CAP} the job fails with them listed.`,
     ...lines,
-    'Fix the cause in the code. A cast, a disable comment or a new SAFETY: comment does not fix a finding.',
+    'Fix the cause in the code without changing what it does at runtime. A disable comment, a ts-ignore, or a cast whose SAFETY: comment the code does not back fixes nothing.',
     'If a finding is wrong, leave that code as it is and say why in your report.',
     'Then end with your report as before.',
   ].join('\n')

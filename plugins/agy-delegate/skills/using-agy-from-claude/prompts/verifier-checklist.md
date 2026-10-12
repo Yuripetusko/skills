@@ -2,13 +2,15 @@
 
 Check the change against each item. Report a problem only on a line the change added or removed,
 plus the old code a removal or rename left behind. Lint and type-check already ran on this change
-and passed, so skip anything they report.
+and passed, so skip anything they report. A fix you propose must keep what the code does at
+runtime (item 3).
 
-1. **`SAFETY:` comments are true.** Every added or edited `SAFETY:` comment must name a check that
-   runs before the cast below it and proves the cast. Follow the value back through the code. It is
-   a finding when the comment cites a check that runs after the cast, a check that proves something
-   else, or no check at all ("always a string here"), or when the value is `unknown` or `any` and
-   nothing narrows it.
+1. **`SAFETY:` comments are true.** Every added or edited `SAFETY:` comment must name what proves
+   the cast below it: a check that runs before the cast, or a property that the function producing
+   the value guarantees ("`normalize` only rewrites strings, so the input's shape stays"). Follow the
+   value back and verify what the comment names. For a property, read that function's every path.
+   It is a finding when the check runs after the cast or proves something else, when a path breaks
+   the property, or when the comment names neither ("always a string here").
 2. **No stale `SAFETY:` comments.** A `SAFETY:` comment needs a cast (`as X` or a non-null `!`)
    within the next 3 lines. One left behind after its cast went away is a finding.
 3. **No behaviour change to satisfy a type.** A change made for a type or lint rule must keep what
@@ -17,10 +19,13 @@ and passed, so skip anything they report.
      that flows on, which turns `null`, `undefined` or an object into a different value
    - `Reflect.get(target, prop, receiver)` rewritten as `target[prop]`, which drops the receiver
    - one type guard swapped for a different one, or a guard with a weaker check
-   - added early returns, changed defaults, removed `await`, or a changed condition
-4. **No cast laundering.** `as unknown as X` rewritten as `Partial<X>`, `Record<string, unknown>` or an
-   intermediate variable followed by one `as X` is still an unchecked cast. So is a new `as X` on a
-   value typed `unknown` or `any` with no check before it.
+   - a throw, guard or early return added so a value fits a type, even for a case "that can't happen"
+   - changed defaults, removed `await`, or a changed condition
+4. **No cast laundering or suppressions.** `as unknown as X` rewritten as `Partial<X>`,
+   `Record<string, unknown>` or an intermediate variable followed by one `as X` is still an unchecked
+   cast. So is a new `as X` on a value typed `unknown` or `any` with no check before it and no true
+   `SAFETY:` comment (item 1). An added `@ts-expect-error`, `@ts-ignore` or lint disable comment
+   counts like an unchecked cast.
 5. **No copied helpers.** The same function added to two or more files is a finding. So is a new
    helper when the repo already has one that does the same job: search for its name and for similar
    names. The fix is to extract it once or import the existing one.

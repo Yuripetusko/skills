@@ -367,6 +367,8 @@ test('verifier FAIL goes back to agy with its findings, and a PASS in the next r
   assert.deepEqual(r.stops.map(a => a.decision), ['continue', 'stop'])
   assert.match(r.stops[0].reason, /^An independent check of your change found problems\. .*This is round 1 of 3/)
   assert.match(r.stops[0].reason, /\n- pkg\/src\/b\.ts:1 \[SAFETY comments are true\] Nothing checks the value before the cast\. Fix: Narrow it/)
+  // A SAFETY: comment backed by the code is a valid fix, and a throw added to fit a type is not.
+  assert.match(r.stops[0].reason, /\nFix the cause in the code without changing what it does at runtime\. .*a cast whose SAFETY: comment the code does not back/)
   assert.ok(r.stops[0].reason.split('\n').length <= 40)
   assert.match(r.report, /^## Gates\n- GATE OK: 0 added, 0 removed · verifier PASS · 2 round\(s\), 1 sent back\n/)
   assert.match(r.report, /- round 1: FAILED, 0 added, 0 removed, \d+s, verifier FAIL, 1 finding\(s\) in \d+s, sent back to agy\n {2}- pkg\/src\/b\.ts:1 \[SAFETY/)
