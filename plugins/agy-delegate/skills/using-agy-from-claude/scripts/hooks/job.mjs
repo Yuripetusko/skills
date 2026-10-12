@@ -50,10 +50,14 @@ export const STOP_TIMEOUT_S = GATE_DEADLINE_S + VERIFIER_DEADLINE_S + 60
 // hook time counts against it, and the guard allows them once more in case it doesn't, and always at
 // least one whole Stop hook run past --print-timeout. The guard fires early enough that the check and
 // verifier run the runner may do after agy exits still end inside `maxS` from the runner's start
-// (`elapsedS` ago); --print-timeout is lowered to keep that slack. `capped` says it was.
+// (`elapsedS` ago); --print-timeout is lowered to keep that slack. `capped` says it was. When setup
+// left too little for a minute of agy plus all that, it returns only `refused`, the reason not to start.
 export function runTimeouts({ timeoutS, gate, elapsedS = 0, maxS, graceS, killS = 10 }) {
   if (!gate) return { printS: timeoutS, guardS: timeoutS + graceS, capped: false }
   const reserve = (ROUND_CAP + 1) * STOP_TIMEOUT_S
+  const needS = 60 + STOP_TIMEOUT_S + graceS + killS + GATE_DEADLINE_S + VERIFIER_DEADLINE_S
+  if (maxS - elapsedS < needS)
+    return { refused: `setup took ${elapsedS}s, leaving ${Math.max(0, maxS - elapsedS)}s of the ${maxS / 60} min budget, under the ${needS}s agy and its gate need` }
   const latest = maxS - elapsedS - killS - GATE_DEADLINE_S - VERIFIER_DEADLINE_S
   const printS = Math.max(60, Math.min(timeoutS + reserve, latest - STOP_TIMEOUT_S - graceS))
   const guardS = Math.max(printS + graceS, Math.min(printS + reserve + graceS, latest))

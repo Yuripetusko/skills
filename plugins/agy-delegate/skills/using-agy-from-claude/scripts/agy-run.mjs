@@ -625,13 +625,15 @@ async function run(opts) {
   }
 
   // agy's turn limit and the runner's guard; see runTimeouts. The relay's 2 h Bash call outlives the job.
-  const { printS, guardS, capped } = runTimeouts({
+  const timeouts = runTimeouts({
     timeoutS,
     gate: Boolean(gate?.configured),
     elapsedS: Math.ceil((Date.now() - started) / 1000),
     maxS: MAX_TIMEOUT_S,
     graceS: GUARD_S,
   })
+  if (timeouts.refused) setupFailed(`${timeouts.refused}, so agy did not start`)
+  const { printS, guardS, capped } = timeouts
   if (capped)
     log(`print-timeout capped at ${printS}s: ${timeoutS}s of work plus ${(ROUND_CAP + 1) * STOP_TIMEOUT_S}s for gate rounds would end past ${MAX_TIMEOUT_S / 60}m`)
 
@@ -692,7 +694,8 @@ async function run(opts) {
   for (const sig of Object.keys(SIGNALS)) process.on(sig, () => stop(sig))
   // agy must bind to this checkout. It did on 1.3.3; fail fast if a later version picks another root.
   // It must also run the job's agent: for an agent it can't load, agy runs its default one, whose
-  // prompt and tool list are not the job's.
+  // prompt and tool list are not the job's. On 1.3.3 init.agent echoes --agent even then, so the
+  // `/agents` preflight is what catches an unknown name; this check is for a later agy that reports it.
   const checkBinding = () => {
     const init = readEvents(eventsFile, eventsStart).find(e => e.event === 'init')?.init
     if (!init) return false

@@ -171,7 +171,8 @@ function cmdNew(args) {
 // which nobody releases. Stale locks are removed only under a second lock, `<name>.takeover`, so takers
 // don't race each other either. Every removal goes through removeIf, which moves the directory away,
 // checks whose it is and puts it back when it is not, so a lock that replaced the one a paused process
-// meant to remove is not deleted. A guard older than 10 s is reaped the same way.
+// meant to remove is not deleted. A guard is reaped the same way once it is older than 10 s and its
+// taker's process is gone (or it has no owner.json); a live taker's guard is never reaped.
 export function lockState(dir, afterRead = () => {}) {
   const file = path.join(dir, 'owner.json')
   const held = readJson(file)
@@ -261,9 +262,11 @@ export function takeLock(name, owner, { beforeMove = () => {} } = {}) {
     if (state.gone || state.changed) continue // released, or replaced, since the failed mkdir: look again
     const who = { pid: process.pid, token: randomUUID() }
     if (!enter(who)) {
-      // A taker holds the guard for a few ms. One that died or stalled inside it is reaped after 10 s.
+      // A taker holds the guard for a few ms. One that died inside it is reaped after 10 s. A live taker
+      // keeps it however long it pauses: reaped, it would resume and move a lock taken since.
       try {
-        if (Date.now() - fs.statSync(guard).mtimeMs > 10_000) removeIf(guard, readJson(path.join(guard, 'owner.json')), 10_000)
+        const taker = readJson(path.join(guard, 'owner.json'))
+        if (!(taker && alive(taker.pid)) && Date.now() - fs.statSync(guard).mtimeMs > 10_000) removeIf(guard, taker, 10_000)
       } catch {}
       sleepMs(1 + Math.random() * 4)
       continue
@@ -272,7 +275,7 @@ export function takeLock(name, owner, { beforeMove = () => {} } = {}) {
       const verdict = lockState(dir)
       if (verdict.stale) {
         beforeMove()
-        // A guard reaped while this process was paused is no longer ours: leave the lock alone then.
+        // A guard that is no longer ours means another taker got in: leave the lock alone then.
         if (sameOwner(readJson(path.join(guard, 'owner.json')), who)) removeIf(dir, verdict.owner, verdict.owner ? 0 : 60_000)
       }
     } finally {

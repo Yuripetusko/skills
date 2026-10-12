@@ -427,8 +427,9 @@ export function snapshotTree(root, scratch) {
   try {
     const real = git(['rev-parse', '--path-format=absolute', '--git-path', 'index'], root).trim()
     if (fs.existsSync(real)) {
-      fs.copyFileSync(real, index)
+      // Stat first: git may replace the index in between, and an older mtime only adds racy entries.
       const { atimeMs, mtimeMs } = fs.statSync(real)
+      fs.copyFileSync(real, index)
       fs.utimesSync(index, new Date(Math.floor(atimeMs)), new Date(Math.floor(mtimeMs)))
     }
     git(['add', '-A'], root, env)

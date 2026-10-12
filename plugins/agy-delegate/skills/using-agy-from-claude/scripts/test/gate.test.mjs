@@ -205,6 +205,41 @@ test('snapshotTree sees a same-size edit that the stat cache alone would miss', 
   }
 })
 
+test('snapshotTree takes the index mtime no later than its contents: a newer index after the copy does not hide the edit', () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gate-racy-')))
+  const git = args => spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd: tmp, encoding: 'utf8' }).stdout.trim()
+  const copy = fs.copyFileSync
+  try {
+    git(['init', '-q'])
+    git(['config', 'core.trustctime', 'false'])
+    const file = path.join(tmp, 'a.txt')
+    const t = new Date('2020-01-01T00:00:00Z')
+    fs.writeFileSync(file, 'aaaa\n')
+    fs.utimesSync(file, t, t)
+    git(['add', 'a.txt'])
+    git(['commit', '-qm', 'init'])
+    const real = path.join(tmp, '.git', 'index')
+    fs.utimesSync(real, t, t)
+    fs.writeFileSync(file, 'bbbb\n')
+    fs.utimesSync(file, t, t)
+    // Right after the copy, another git process replaces the index (lock file and rename) with a newer one.
+    fs.copyFileSync = (from, to, ...rest) => {
+      copy(from, to, ...rest)
+      if (from !== real) return
+      const tmpIndex = `${real}.lock`
+      copy(real, tmpIndex)
+      const later = new Date(t.getTime() + 10_000)
+      fs.utimesSync(tmpIndex, later, later)
+      fs.renameSync(tmpIndex, real)
+    }
+    const tree = snapshotTree(tmp, path.join(tmp, '.git', 'scratch'))
+    assert.equal(git(['cat-file', 'blob', `${tree}:a.txt`]), 'bbbb')
+  } finally {
+    fs.copyFileSync = copy
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 describe('jobs.mjs gate', () => {
   let tmp, repo, jobsDir, state, configFile, job, gitState
   const git = args => spawnSync('git', args, { cwd: repo, encoding: 'utf8' }).stdout

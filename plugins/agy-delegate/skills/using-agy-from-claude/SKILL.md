@@ -101,8 +101,10 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
 - agy's `--print-timeout` gets 72 extra minutes for gate rounds (4 Stop hooks at 1080 s each). It is capped so the runner ends within 110
   minutes of its start, its own check and verifier run after agy exits included, and so the runner's
   kill timer allows at least one whole Stop hook run past `--print-timeout`. The cap applies to every
-  job with a gate, at about 73 minutes. Whether hook time counts against `--print-timeout` is not
-  measured yet. The runner's own kill timer allows for both.
+  job with a gate, at 4370 s less the time setup took: about 70 minutes after a 2-minute baseline
+  (measured live at 4236 to 4240 s). Whether hook time counts against `--print-timeout` is not
+  measured yet. The runner's own kill timer allows for both. When setup (the baseline, mostly) leaves
+  less than 2290 s of the 110 minutes, the job exits 18 and agy never starts.
 - `--gate-config <path>` on `run` points at a config outside the checkout, for tests.
 
 ## Runtime
@@ -345,6 +347,8 @@ come from the current checkout, not from the PR's head.
   and exits 0. `agy -p /agents --output-format json` lists the agents agy can load. Both slash
   commands answer in about 3 s without calling a model, so the runner checks both before launch.
   Because workspace hooks fire under any agent, the canary proves the hooks ran, not which agent ran.
+  The `init` event's `agent` echoes the `--agent` name even when agy runs its default agent instead,
+  so the runner's init check proves little; the `/agents` preflight is what catches an unknown name.
 - The `init` event lists `sed_file`, `command_status` and `send_command_input`, but an agent whose
   `tools` names any of them fails before its first step with "tool ... not found in registry". The
   `/agents` preflight does not catch that. The `init` event lists every tool even when the agent has
