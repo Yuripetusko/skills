@@ -694,7 +694,8 @@ async function run(opts) {
   for (const sig of Object.keys(SIGNALS)) process.on(sig, () => stop(sig))
   // agy must bind to this checkout. It did on 1.3.3; fail fast if a later version picks another root.
   // It must also run the job's agent: for an agent it can't load, agy runs its default one, whose
-  // prompt and tool list are not the job's.
+  // prompt and tool list are not the job's. On 1.3.3 init.agent echoes --agent even then, so the
+  // `/agents` preflight is what catches an unknown name; this check is for a later agy that reports it.
   const checkBinding = () => {
     const init = readEvents(eventsFile, eventsStart).find(e => e.event === 'init')?.init
     if (!init) return false

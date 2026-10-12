@@ -346,6 +346,8 @@ come from the current checkout, not from the PR's head.
   and exits 0. `agy -p /agents --output-format json` lists the agents agy can load. Both slash
   commands answer in about 3 s without calling a model, so the runner checks both before launch.
   Because workspace hooks fire under any agent, the canary proves the hooks ran, not which agent ran.
+  The `init` event's `agent` echoes the `--agent` name even when agy runs its default agent instead,
+  so the runner's init check proves little; the `/agents` preflight is what catches an unknown name.
 - The `init` event lists `sed_file`, `command_status` and `send_command_input`, but an agent whose
   `tools` names any of them fails before its first step with "tool ... not found in registry". The
   `/agents` preflight does not catch that. The `init` event lists every tool even when the agent has
