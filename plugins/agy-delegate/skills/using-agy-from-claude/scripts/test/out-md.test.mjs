@@ -144,5 +144,6 @@ describe('rules in the assembled prompt', () => {
     assert.ok(prompt.includes(noAiClis))
     assert.ok(prompt.includes('Rules for this job'))
     assert.ok(prompt.includes('Never edit ticket files, MAP.md or SPEC.md'))
+    assert.ok(prompt.includes("read that package's `AGENTS.md`"))
   })
 })
