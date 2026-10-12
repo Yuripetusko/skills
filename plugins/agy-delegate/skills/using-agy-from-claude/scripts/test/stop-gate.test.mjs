@@ -157,6 +157,24 @@ test('a Stop verdict from an earlier execution does not count', () => {
   assert.equal(r.status, 17, r.report)
 })
 
+test('a Stop while agy still has work running runs no check and spends no round', () => {
+  const ctx = setup()
+  const r = run(ctx, { env: { ...fake('1,0').env, FAKE_BUSY_STOP: 'mid' } })
+  assert.equal(r.status, 0, r.report)
+  assert.deepEqual(r.stops.map(a => a.decision), ['stop', 'continue', 'stop'])
+  assert.deepEqual(r.gateCalls.map(a => a[0]), ['baseline', 'check', 'check'])
+  assert.match(r.report, /- round 1: FAILED, 1 added, 0 removed, \d+s, sent back to agy\n- round 2: OK/)
+  assert.equal(r.state.gate.history[0].fullyIdle, true)
+})
+
+test('a run that ends at a Stop with work still running fails with exit 17', () => {
+  const ctx = setup()
+  const r = run(ctx, { env: { ...fake('0').env, FAKE_BUSY_STOP: 'last' } })
+  assert.equal(r.status, 17, r.report)
+  assert.deepEqual(r.gateCalls.map(a => a[0]), ['baseline'])
+  assert.match(r.report, /GATE ERROR: agy stopped with work still running, and no check ran after that/)
+})
+
 test('a baseline that cannot run exits 18 before agy starts, with the gate output in report.md', () => {
   const ctx = setup()
   const r = run(ctx, { env: { ...fake('0').env, FAKE_GATE_BASELINE: '2' } })

@@ -54,9 +54,21 @@ async function round(raw) {
     s.gate = { ...s.gate, ...patch, run }
     writeState(dir, s)
   }
+  let input = {}
+  try {
+    input = JSON.parse(raw || '{}')
+  } catch {}
+  // agy also stops mid-job, for example at a `wait` step while its own commands run (terminationReason
+  // TERMINAL_STEP_TYPE in agy 1.3.3). A check then races those commands and could spend a round on
+  // half-done work, so it waits for a stop with nothing running. The verdict drops to error until
+  // then, so a job that ends here fails.
+  if (input.fullyIdle === false) {
+    save({ verdict: 'error', reason: 'agy stopped with work still running, and no check ran after that' })
+    logLine(dir, { hook: 'Stop', decision: 'stop', skipped: 'not idle', terminationReason: input.terminationReason ?? null })
+    return STOP
+  }
   save({ round: n, verdict: 'error', reason: `the Stop hook did not finish round ${n}` })
-  const input = JSON.parse(raw || '{}')
-  const entry = { round: n, executionNum: input.executionNum ?? null, terminationReason: input.terminationReason ?? null }
+  const entry = { round: n, executionNum: input.executionNum ?? null, terminationReason: input.terminationReason ?? null, fullyIdle: input.fullyIdle ?? null }
   const finish = (verdict, action, fields, patch = {}) => {
     const h = { ...entry, verdict, action, ...fields }
     save({ verdict, history: [...(readState(dir).gate?.history ?? []), h], ...patch })
@@ -66,7 +78,7 @@ async function round(raw) {
     finish('error', 'stop', { lines: [] }, { reason: 'state.json changed during the run' })
     return STOP
   }
-  if (input.terminationReason === 'error') {
+  if (String(input.terminationReason).toLowerCase() === 'error') {
     const error = String(input.error ?? '').split('\n')[0]
     finish('error', 'stop', { lines: error ? [error] : [] }, { reason: `agy stopped on an error, so the gate did not run${error ? `: ${error}` : ''}` })
     return STOP

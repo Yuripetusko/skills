@@ -13,6 +13,8 @@
 // FAKE_ROUNDS_FILE  JSON list of tool-call lists, one per round after a Stop hook answers continue
 // FAKE_STOP_HOOK=0  never call the Stop hooks
 // FAKE_HOOK_TIMEOUT_S  kill a hook after this many seconds instead of its configured timeout
+// FAKE_BUSY_STOP    `mid`: one Stop with fullyIdle false before the answer, as at a `wait` step;
+//                   `last`: every Stop says fullyIdle false
 // Like agy 1.3.3, a Stop hook that exits non-zero, prints no JSON or times out lets the run stop, and
 // the 11th consecutive continue is ignored. Each Stop answer is logged as a `fake_stop_hook` event.
 
@@ -114,10 +116,13 @@ const answer = text => {
   return text
 }
 play(readList(env.FAKE_CALLS_FILE))
+const stopInput = (executionNum, fullyIdle) => ({ ...common, executionNum, terminationReason: fullyIdle ? 'NO_TOOL_CALL' : 'TERMINAL_STEP_TYPE', fullyIdle })
+if (useHooks && env.FAKE_BUSY_STOP === 'mid')
+  for (const h of handlers('Stop')) out({ event: 'fake_stop_hook', executionNum: 0, answer: callHook(h, stopInput(0, false)) })
 let response = answer('Fake agy finished.')
 const rounds = readList(env.FAKE_ROUNDS_FILE)
 for (let executionNum = 0; useHooks && env.FAKE_STOP_HOOK !== '0'; executionNum++) {
-  const answers = handlers('Stop').map(h => callHook(h, { ...common, executionNum, terminationReason: 'model_stop', fullyIdle: true }))
+  const answers = handlers('Stop').map(h => callHook(h, stopInput(executionNum, env.FAKE_BUSY_STOP !== 'last')))
   const cont = answers.find(a => a.decision === 'continue')
   for (const a of answers) out({ event: 'fake_stop_hook', executionNum, answer: a })
   if (!cont || executionNum >= 10) break

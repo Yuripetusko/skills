@@ -55,6 +55,9 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   any changed file outside the baseline's scope, go back to agy with the instruction to fix them
   without suppressing them. agy gets 3 such rounds. If the 4th check still fails, the hook lets agy
   stop and the job exits 17 (`gate`).
+- agy also stops mid-job, for example at a `wait` step while its own commands run. When the Stop
+  input says `fullyIdle: false`, the hook runs no check and spends no round. The verdict stays
+  `error` until a later check, so a job that ends there exits 17.
 - A check that cannot run, a Stop hook that crashes or times out (600 s), or a run that ends without
   any check also exits 17. Only a clean check from this run counts.
 - `report.md` opens with a "Gates" section. Its first line is the verdict: `GATE OK`, `GATE FAILED`,
@@ -270,6 +273,13 @@ come from the current checkout, not from the PR's head.
   and exits 0. `agy -p /agents --output-format json` lists the agents agy can load. Both slash
   commands answer in about 3 s without calling a model, so the runner checks both before launch.
   Because workspace hooks fire under any agent, the canary proves the hooks ran, not which agent ran.
+- The `init` event lists `sed_file`, `command_status` and `send_command_input`, but an agent whose
+  `tools` names any of them fails before its first step with "tool ... not found in registry". The
+  `/agents` preflight does not catch that. The `init` event lists every tool even when the agent has
+  a `tools` allowlist.
+- The `Stop` hook fires at the final answer (`terminationReason` `NO_TOOL_CALL`) and also mid-job at
+  a `wait` step (`TERMINAL_STEP_TYPE`), after which agy carries on. A mid-job stop's hook time showed
+  up in the result's `duration_seconds`; the final stop's did not.
 - A `PreToolUse` deny holds under `--dangerously-skip-permissions`. The step ends in state ERROR and
   the model sees the reason. Empty output, a crash or a timeout also deny. The stream carries no
   hook events, which is why the hooks write `hook.log`.
