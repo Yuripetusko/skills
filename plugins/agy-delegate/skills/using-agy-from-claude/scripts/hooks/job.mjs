@@ -28,6 +28,22 @@ export const VERIFIER_DEADLINE_S = VERIFIER_PRINT_S + 30
 // and tree snapshots, so stop.mjs records a verdict before agy kills it.
 export const STOP_TIMEOUT_S = GATE_DEADLINE_S + VERIFIER_DEADLINE_S + 60
 
+// agy's --print-timeout (printS) and when the runner kills agy itself (guardS), in seconds from now.
+// `graceS` is the time agy gets to exit after --print-timeout, `killS` the time between the runner's
+// SIGTERM and SIGKILL. With a gate, --print-timeout also covers ROUND_CAP + 1 Stop hook runs, in case
+// hook time counts against it, and the guard allows them once more in case it doesn't, and always at
+// least one whole Stop hook run past --print-timeout. The guard fires early enough that the check and
+// verifier run the runner may do after agy exits still end inside `maxS` from the runner's start
+// (`elapsedS` ago); --print-timeout is lowered to keep that slack. `capped` says it was.
+export function runTimeouts({ timeoutS, gate, elapsedS = 0, maxS, graceS, killS = 10 }) {
+  if (!gate) return { printS: timeoutS, guardS: timeoutS + graceS, capped: false }
+  const reserve = (ROUND_CAP + 1) * STOP_TIMEOUT_S
+  const latest = maxS - elapsedS - killS - GATE_DEADLINE_S - VERIFIER_DEADLINE_S
+  const printS = Math.max(60, Math.min(timeoutS + reserve, latest - STOP_TIMEOUT_S - graceS))
+  const guardS = Math.max(printS + graceS, Math.min(printS + reserve + graceS, latest))
+  return { printS, guardS, capped: printS < timeoutS + reserve }
+}
+
 const SCRIPTS = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // `jobs.mjs gate`, or for tests a script that takes the same arguments (AGY_DELEGATE_GATE_BIN).
 export const gateArgv = () => [process.execPath, process.env.AGY_DELEGATE_GATE_BIN || path.join(SCRIPTS, 'jobs.mjs'), 'gate']

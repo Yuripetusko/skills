@@ -9,7 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { progress, stateHash, writeState } from '../hooks/job.mjs'
+import { GATE_DEADLINE_S, progress, ROUND_CAP, runTimeouts, stateHash, STOP_TIMEOUT_S, VERIFIER_DEADLINE_S, writeState } from '../hooks/job.mjs'
 import { runVerifier, writeVerifierConfig } from '../hooks/verifier.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -221,8 +221,29 @@ test('with a gate, the agent prompt names the stop check and --print-timeout cov
   const hooks = JSON.parse(fs.readFileSync(path.join(ctx.job, 'agy', '.agents', 'hooks.json'), 'utf8'))
   // A 570 s gate check, a 450 s verifier run and 60 s for the diff and tree snapshots.
   assert.equal(hooks['agy-delegate-job'].Stop[0].timeout, 1080)
-  // 2 min of work plus 4 Stop hook runs of 1080 s.
-  assert.match(r.stderr, /print-timeout 4440s/)
+  // 2 min of work plus 4 Stop hook runs of 1080 s would be 4440 s. That leaves the guard no whole Stop
+  // hook run before 110 min, so it is capped: 6600 - 10 - 570 - 450 - 1080 - 120 s, less the setup time.
+  const printS = Number(/print-timeout (\d+)s/.exec(r.stderr)?.[1])
+  assert.ok(printS <= 4370 && printS >= 4360, r.stderr)
+  assert.match(r.stderr, /print-timeout capped at \d+s: 120s of work plus 4320s for gate rounds/)
+})
+
+test('runTimeouts: the guard allows a whole Stop hook run past --print-timeout, and the runner ends inside 110 min', () => {
+  const maxS = 110 * 60
+  const graceS = 120
+  for (const timeoutS of [60, 120, 600, 1800, 3600, maxS])
+    for (const elapsedS of [0, 5, 600]) {
+      const t = runTimeouts({ timeoutS, gate: true, elapsedS, maxS, graceS })
+      const at = `timeout ${timeoutS}s, elapsed ${elapsedS}s`
+      assert.ok(t.guardS - t.printS >= STOP_TIMEOUT_S + graceS, `${at}: ${JSON.stringify(t)}`)
+      // The guard, SIGKILL 10 s later, then the runner's own gate check and verifier run.
+      assert.ok(elapsedS + t.guardS + 10 + GATE_DEADLINE_S + VERIFIER_DEADLINE_S <= maxS, `${at}: ${JSON.stringify(t)}`)
+      assert.ok(t.printS <= timeoutS + (ROUND_CAP + 1) * STOP_TIMEOUT_S, at)
+    }
+  // A short job: 2 min of work plus 4 Stop hook runs doesn't fit, so --print-timeout is lowered.
+  assert.deepEqual(runTimeouts({ timeoutS: 120, gate: true, maxS, graceS }), { printS: 4370, guardS: 5570, capped: true })
+  // Without a gate nothing changes.
+  assert.deepEqual(runTimeouts({ timeoutS: 1800, gate: false, maxS, graceS }), { printS: 1800, guardS: 1920, capped: false })
 })
 
 test('a verifier run or a job without a gate leaves stop.mjs inert', () => {
