@@ -261,6 +261,26 @@ test('runTimeouts: the guard allows a whole Stop hook run past --print-timeout, 
   assert.deepEqual(runTimeouts({ timeoutS: 1800, gate: false, maxS, graceS }), { printS: 1800, guardS: 1920, capped: false })
 })
 
+test('runTimeouts: a setup that left too little of the 110 min is refused, never given a guard past it', () => {
+  const maxS = 110 * 60
+  const graceS = 120
+  for (const timeoutS of [60, 1800, maxS])
+    for (let elapsedS = 0; elapsedS <= maxS + 100; elapsedS += 25) {
+      const t = runTimeouts({ timeoutS, gate: true, elapsedS, maxS, graceS })
+      if (t.refused) continue
+      const at = `timeout ${timeoutS}s, elapsed ${elapsedS}s: ${JSON.stringify(t)}`
+      assert.ok(t.printS >= 60, at)
+      assert.ok(t.guardS - t.printS >= STOP_TIMEOUT_S + graceS, at)
+      assert.ok(elapsedS + t.guardS + 10 + GATE_DEADLINE_S + VERIFIER_DEADLINE_S <= maxS, at)
+    }
+  // The review's case: a baseline that ran to 6500 s.
+  assert.match(runTimeouts({ timeoutS: 1800, gate: true, elapsedS: 6500, maxS, graceS }).refused ?? '', /6500s.* 100s/)
+  // A minute of agy, a Stop hook run, the guard's slack, SIGKILL's 10 s and the runner's own round: 2290 s.
+  assert.equal(runTimeouts({ timeoutS: 1800, gate: true, elapsedS: maxS - 2290, maxS, graceS }).printS, 60)
+  assert.ok(runTimeouts({ timeoutS: 1800, gate: true, elapsedS: maxS - 2289, maxS, graceS }).refused)
+  assert.equal(runTimeouts({ timeoutS: 1800, gate: false, elapsedS: 6500, maxS, graceS }).refused, undefined)
+})
+
 test('verifierTimes: a Stop hook ends, verdict saved, before agy kills it at its timeout', () => {
   // stop.mjs gives the verifier its timeout less HOOK_RESERVE_S, less what the check and snapshots took.
   const hook = spentS => {

@@ -102,7 +102,8 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   minutes of its start, its own check and verifier run after agy exits included, and so the runner's
   kill timer allows at least one whole Stop hook run past `--print-timeout`. The cap applies to every
   job with a gate, at about 73 minutes. Whether hook time counts against `--print-timeout` is not
-  measured yet. The runner's own kill timer allows for both.
+  measured yet. The runner's own kill timer allows for both. When setup (the baseline, mostly) leaves
+  less than 2290 s of the 110 minutes, the job exits 18 and agy never starts.
 - `--gate-config <path>` on `run` points at a config outside the checkout, for tests.
 
 ## Runtime

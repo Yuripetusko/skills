@@ -625,13 +625,15 @@ async function run(opts) {
   }
 
   // agy's turn limit and the runner's guard; see runTimeouts. The relay's 2 h Bash call outlives the job.
-  const { printS, guardS, capped } = runTimeouts({
+  const timeouts = runTimeouts({
     timeoutS,
     gate: Boolean(gate?.configured),
     elapsedS: Math.ceil((Date.now() - started) / 1000),
     maxS: MAX_TIMEOUT_S,
     graceS: GUARD_S,
   })
+  if (timeouts.refused) setupFailed(`${timeouts.refused}, so agy did not start`)
+  const { printS, guardS, capped } = timeouts
   if (capped)
     log(`print-timeout capped at ${printS}s: ${timeoutS}s of work plus ${(ROUND_CAP + 1) * STOP_TIMEOUT_S}s for gate rounds would end past ${MAX_TIMEOUT_S / 60}m`)
 
