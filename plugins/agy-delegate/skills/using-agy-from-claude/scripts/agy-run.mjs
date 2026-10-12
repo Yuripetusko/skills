@@ -25,9 +25,10 @@ const GUARD_S = 120 // wall clock past --print-timeout before the runner kills a
 const EXIT = { ok: 0, usage: 1, failed: 2, empty: 3, quota: 10, auth: 11, timeout: 12, missing: 13, model: 14, denied: 15, gate: 17, setup: 18 }
 // The job's main agent. AGY_DELEGATE_AGENT overrides the --agent name only, for testing the setup checks.
 const AGENT = 'delegate-implementer'
-// Names from agy 1.3.3's init event. Left out: subagent, browser, MCP, image and permission tools.
-// Also left out: sed_file, command_status and send_command_input. The init event lists them, but an
-// agent naming them fails with "tool ... not found in registry" before its first step.
+// Names from agy 1.3.3's init event. Left out: subagent, image and permission tools, and the names the
+// registry rejects in a `tools` list ("tool ... not found in registry"): sed_file, command_status,
+// send_command_input, the MCP tools and the browser tools. agy adds the MCP tools anyway; a PreToolUse
+// rule denies call_mcp_tool in implement jobs (hooks/pre-tool.mjs).
 const AGENT_TOOLS = [
   'view_file', 'list_dir', 'find_by_name', 'grep_search',
   'write_to_file', 'replace_file_content', 'multi_replace_file_content',
