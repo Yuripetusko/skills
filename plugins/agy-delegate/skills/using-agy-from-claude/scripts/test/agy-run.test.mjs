@@ -26,6 +26,8 @@ function setup() {
   const job = path.join(root, 'jobs', 'agy-test')
   fs.mkdirSync(job, { recursive: true })
   fs.writeFileSync(path.join(job, 'brief.md'), 'paths: src/**\n\nRun claude, write outside paths, edit src/b.ts.\n')
+  // As `jobs.mjs new` writes it. The implement job's gate baseline finds the job through it.
+  fs.writeFileSync(path.join(job, 'meta.json'), JSON.stringify({ id: 'agy-test', tool: 'agy', cwd: repo, toplevel: repo }))
   const calls = path.join(root, 'calls.json')
   fs.writeFileSync(
     calls,

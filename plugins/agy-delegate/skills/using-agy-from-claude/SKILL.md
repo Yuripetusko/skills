@@ -43,6 +43,36 @@ agy sees the reason for each block. The runner's report lists them under "blocke
 `<dir>/hook.log` has every decision. Matching a command line stops accidents, not intent: a script
 file still runs a blocked command, so the scope check and the caller's review stay.
 
+## Lint and type-check gate
+
+Implement jobs check lint and type-check inside agy's loop when the checkout has a gate config,
+`.agents/delegate-gate.json`. The format is in [references/gate-config.md](references/gate-config.md).
+
+- Before agy starts, the runner records a baseline with `gate baseline`. It needs installed
+  dependencies. On a 12-package pnpm monorepo it took about 2.5 minutes, and 6 with cold caches. A
+  baseline that cannot run fails the job with exit 18, and agy never starts.
+- Each time agy tries to finish, a Stop hook runs `gate check`. The findings the change added, and
+  any changed file outside the baseline's scope, go back to agy with the instruction to fix them
+  without suppressing them. agy gets 3 such rounds. If the 4th check still fails, the hook lets agy
+  stop and the job exits 17 (`gate`).
+- agy also stops mid-job, for example at a `wait` step while its own commands run. When the Stop
+  input says `fullyIdle: false`, the hook runs no check and spends no round.
+- Each check records the git tree it checked. After agy exits, the runner takes a verdict only from
+  a check of this run on the tree agy left. When none covers it, the runner checks the tree itself
+  once: a Stop hook may have crashed or timed out (600 s), agy may have edited after its last check,
+  or no Stop came. That check failing or not running exits 17.
+- A rerun in the same job dir keeps the first baseline and the earlier rounds, so findings an
+  earlier execution added still count and the 3 rounds are shared.
+- `report.md` opens with a "Gates" section. Its first line is the verdict: `GATE OK`, `GATE FAILED`,
+  `GATE ERROR` or `GATE: not configured`. Then come the baseline, one line per round and the findings
+  still added. `meta.json` keeps the verdict and the rounds in `gate`.
+- Without a config the report says `GATE: not configured`, and nothing is checked.
+- agy's `--print-timeout` gets 40 extra minutes for gate rounds (4 checks at the hook's 600 s
+  timeout). It is capped so the runner ends within 110 minutes of its start, its own check after
+  agy exits included. Whether hook time counts against `--print-timeout` is not measured yet. The
+  runner's own kill timer allows for both.
+- `--gate-config <path>` on `run` points at a config outside the checkout, for tests.
+
 ## Runtime
 
 Every Bash call starts a fresh shell. Begin each call with:
@@ -88,7 +118,9 @@ them in the saved brief, where agy sees `paths:` too.
 
 ## 3. Implement mode: prepare the worktree
 
-Only when the brief has `base:` or `install:`. Run in the foreground with `timeout: 600000`:
+Only when the brief has `base:` or `install:`, or when the checkout has `.agents/delegate-gate.json`
+but no `node_modules`. The gate needs installed dependencies, so in that last case pass
+`--install deps` even when the brief has no `install:`. Run in the foreground with `timeout: 600000`:
 
 ```bash
 node "$JOBS" wt-setup [--base <ref>] [--install | --install deps]
@@ -140,13 +172,20 @@ needs flagging. Never summarise, judge or correct agy's answer in it.
   verbatim, then `report.md` verbatim.
 - **Implement mode, after exit 0.** First run
   `node "$JOBS" wt-finish --job "<dir>" --paths '<the paths: value as written>'`, adding
-  `--message "<commit>"` when the brief has `commit:`. Its first line is the verdict: `SCOPE OK` or
-  `SCOPE VIOLATION`. Put that line, and the commit sha if one was made, at the end of your header
-  line, then `wt-finish`'s full output, then `out.md` and `report.md`. A violation (exit 2) commits
-  nothing, and you revert nothing: the caller decides.
-- **Non-zero exit.** Reply with `agy <mode> failed (exit <code>: <label>) · <job>`, then `report.md`,
-  then the last 15 lines of `<dir>/agy-stderr.log`. If `out.md` has text, include it, labelled
-  partial. Give no substitute answer, and skip `wt-finish`.
+  `--message "<commit>"` when the brief has `commit:`. Its first line is the scope verdict:
+  `SCOPE OK` or `SCOPE VIOLATION`. Your header line leads with the verdicts:
+  `agy implement · <job> · <model> · <gate verdict> · <scope verdict>`, plus the commit sha if one
+  was made. The gate verdict is the first line under `## Gates` in `report.md`. Then give
+  `wt-finish`'s full output, then `out.md` and `report.md`. A violation (exit 2) commits nothing, and
+  you revert nothing: the caller decides.
+- **Exit 17 (gate).** agy finished, but the gate still failed or could not run. Run `wt-finish` as
+  above but without `--message`, so nothing is committed. Reply with
+  `agy implement failed the gate (exit 17) · <job> · <model> · <gate verdict> · <scope verdict>`,
+  then `wt-finish`'s output, then `out.md` verbatim (agy's answer is complete, not partial), then
+  `report.md`.
+- **Any other non-zero exit.** Reply with `agy <mode> failed (exit <code>: <label>) · <job>`, then
+  `report.md`, then the last 15 lines of `<dir>/agy-stderr.log`. If `out.md` has text, include it,
+  labelled partial. Give no substitute answer, and skip `wt-finish`.
 
 | Exit | Label   | Meaning and what to say                                                        |
 | ---- | ------- | ------------------------------------------------------------------------------ |
@@ -159,7 +198,8 @@ needs flagging. Never summarise, judge or correct agy's answer in it.
 | 14   | model   | Model not available; the error lists the valid ones                            |
 | 15   | denied  | agy was refused a permission it cannot get headless                            |
 | 16   | busy    | Another write job is running in this checkout; `node "$JOBS" jobs` shows it    |
-| 18   | setup   | The job rules did not load, so nothing was enforced. Report it; don't retry until it is fixed |
+| 17   | gate    | The gate still found added findings after 3 rounds, or could not run. The Gates section in `report.md` lists them |
+| 18   | setup   | The job rules or the gate baseline did not load, so nothing was enforced. Report it; don't retry until it is fixed |
 | 128+ | signal  | Cancelled or killed                                                            |
 
 ## Messages from the delegating agent
@@ -192,9 +232,10 @@ Jobs live in `~/.claude/delegate-jobs/<tool>-<date>-<time>-<rand>/` (override wi
 `DELEGATE_JOBS_DIR`). Each holds `meta.json`, `brief.md`, `input.jsonl`, `events.jsonl` (agy's
 stream), `agy-stderr.log`, `out.md`, `err.log` and `report.md`. agy jobs also hold `agy/` (the job's
 agent and hooks), `state.json`, `hook.log` and `loaded`, the canary the hooks write when they start.
+Implement jobs with a gate also hold `gate/`: the baseline and each round's snapshot and delta.
 Old jobs are pruned after 7 days.
-`jobs.mjs` and `diff.mjs` are shared with the `codex-delegate` plugin, which has identical copies.
-Each `new` copies both to `~/.claude/delegate-jobs/`, a path that does not depend on where the
+`jobs.mjs`, `diff.mjs` and `gate.mjs` are shared with the `codex-delegate` plugin, which has identical
+copies. Each `new` copies them to `~/.claude/delegate-jobs/`, a path that does not depend on where the
 plugin is installed.
 
 ## Diff and applicable rules
@@ -236,6 +277,13 @@ come from the current checkout, not from the PR's head.
   and exits 0. `agy -p /agents --output-format json` lists the agents agy can load. Both slash
   commands answer in about 3 s without calling a model, so the runner checks both before launch.
   Because workspace hooks fire under any agent, the canary proves the hooks ran, not which agent ran.
+- The `init` event lists `sed_file`, `command_status` and `send_command_input`, but an agent whose
+  `tools` names any of them fails before its first step with "tool ... not found in registry". The
+  `/agents` preflight does not catch that. The `init` event lists every tool even when the agent has
+  a `tools` allowlist.
+- The `Stop` hook fires at the final answer (`terminationReason` `NO_TOOL_CALL`) and also mid-job at
+  a `wait` step (`TERMINAL_STEP_TYPE`), after which agy carries on. In one run, a mid-job stop's hook
+  time showed up in the result's `duration_seconds` and the final stop's did not.
 - A `PreToolUse` deny holds under `--dangerously-skip-permissions`. The step ends in state ERROR and
   the model sees the reason. Empty output, a crash or a timeout also deny. The stream carries no
   hook events, which is why the hooks write `hook.log`.

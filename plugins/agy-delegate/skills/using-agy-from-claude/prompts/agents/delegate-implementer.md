@@ -14,4 +14,6 @@ This job's hooks block some tool calls: {{blocked}}.
 A blocked call fails with "tool call denied by pre-tool hook" and the reason.
 Do not try another way. Name the blocked call in your final report.
 
+{{gate}}
+
 Do the work yourself. You have no subagents.

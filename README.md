@@ -32,8 +32,15 @@ The implementers take header lines at the top of the brief:
 - `install: yes`: runs the repo's `setup-worktree` script, or a frozen install.
 - `commit: <message>`: commits on the Claude side once the change stays inside `paths`.
 
-Tests, lint and type-check stay with the caller, who should never take the delegate's own "tests
-pass" at face value.
+Tests stay with the caller, who should never take the delegate's own "tests pass" at face value. So
+do lint and type-check, unless the target repo has a gate config.
+
+**Lint and type-check gate for agy.** When the target repo commits `.agents/delegate-gate.json`,
+`agy-implementer` records lint and type-check findings before agy starts. A Stop hook checks again
+each time agy tries to finish and sends any new findings back to agy, up to 3 times. If findings
+remain, or the gate can't run, the job exits 17 (`gate`). The relay's report leads with the gate
+verdict: `GATE OK`, `GATE FAILED`, `GATE ERROR` or `GATE: not configured`. The config format is in
+[gate-config.md](plugins/agy-delegate/skills/using-agy-from-claude/references/gate-config.md).
 
 **Permissions.** agy runs with `--dangerously-skip-permissions`, and Codex write jobs use its
 `workspace-write` sandbox, the same trust as running Claude in auto mode with whole-project access.
