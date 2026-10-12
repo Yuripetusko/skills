@@ -7,7 +7,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { after, before, describe, test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { delta, listUnits, parseOxlintJson, parseTsc, resolveScope } from '../gate.mjs'
+import { delta, listUnits, parseOxlintJson, parseTsc, resolveScope, snapshotTree } from '../gate.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const JOBS = path.join(here, '..', 'jobs.mjs')
@@ -180,6 +180,31 @@ describe('scope', () => {
   })
 })
 
+test('snapshotTree sees a same-size edit that the stat cache alone would miss', () => {
+  const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gate-racy-')))
+  const git = args => spawnSync('git', ['-c', 'user.email=t@example.com', '-c', 'user.name=t', ...args], { cwd: tmp, encoding: 'utf8' }).stdout.trim()
+  try {
+    git(['init', '-q'])
+    // Without ctime, only mtime and size tell an edit apart, and both are set below.
+    git(['config', 'core.trustctime', 'false'])
+    const file = path.join(tmp, 'a.txt')
+    const t = new Date('2020-01-01T00:00:00Z')
+    fs.writeFileSync(file, 'aaaa\n')
+    fs.utimesSync(file, t, t)
+    git(['add', 'a.txt'])
+    git(['commit', '-qm', 'init'])
+    // The index is no newer than the entry, so git treats the entry as racy and compares contents.
+    fs.utimesSync(path.join(tmp, '.git', 'index'), t, t)
+    fs.writeFileSync(file, 'bbbb\n')
+    fs.utimesSync(file, t, t)
+    const tree = snapshotTree(tmp, path.join(tmp, '.git', 'scratch'))
+    assert.notEqual(tree, git(['rev-parse', 'HEAD^{tree}']))
+    assert.equal(git(['cat-file', 'blob', `${tree}:a.txt`]), 'bbbb')
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true })
+  }
+})
+
 describe('jobs.mjs gate', () => {
   let tmp, repo, jobsDir, state, configFile, job, gitState
   const git = args => spawnSync('git', args, { cwd: repo, encoding: 'utf8' }).stdout
@@ -216,7 +241,13 @@ describe('jobs.mjs gate', () => {
     fs.writeFileSync(path.join(dir, 'brief.md'), `paths: ${paths}\ncommit: test\n\nDo the thing.\n`)
     return dir
   }
-  const edit = (file, text) => fs.writeFileSync(path.join(repo, file), text)
+  // The mtime moves ahead, so an edit of the same size as a file `reset` just wrote never matches the
+  // stat cache, whatever git's racy check decides.
+  const edit = (file, text) => {
+    fs.writeFileSync(path.join(repo, file), text)
+    const later = new Date(Date.now() + 10_000)
+    fs.utimesSync(path.join(repo, file), later, later)
+  }
   const metaGate = dir => JSON.parse(fs.readFileSync(path.join(dir, 'meta.json'), 'utf8')).gate
   const reset = () => {
     spawnSync('git', ['checkout', '-q', '--', '.'], { cwd: repo })

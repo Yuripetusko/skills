@@ -95,9 +95,10 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
 - Without a config the report says `GATE: not configured`, and nothing is checked.
 - agy's `--print-timeout` gets 72 extra minutes for gate rounds (4 Stop hooks at 1080 s: a 570 s
   check, a 450 s verifier run and 60 s for the diff). It is capped so the runner ends within 110
-  minutes of its start, its own check and verifier run after agy exits included. With the default
-  30 minutes of work the cap applies, at about 90 minutes. Whether hook time counts against `--print-timeout` is not measured yet. The
-  runner's own kill timer allows for both.
+  minutes of its start, its own check and verifier run after agy exits included, and so the runner's
+  kill timer allows at least one whole Stop hook run past `--print-timeout`. The cap applies to every
+  job with a gate, at about 73 minutes. Whether hook time counts against `--print-timeout` is not
+  measured yet. The runner's own kill timer allows for both.
 - `--gate-config <path>` on `run` points at a config outside the checkout, for tests.
 
 ## Runtime
@@ -285,7 +286,7 @@ Implement jobs with a gate also hold `gate/`: the baseline and each round's snap
 `agy-verifier/` (the verifier's agent and hook) and `verifier/` (each run's inputs, events and
 verdict).
 Old jobs are pruned after 7 days.
-`jobs.mjs`, `diff.mjs` and `gate.mjs` are shared with the `codex-delegate` plugin, which has identical
+`jobs.mjs`, `clean-line.mjs`, `diff.mjs` and `gate.mjs` are shared with the `codex-delegate` plugin, which has identical
 copies. Each `new` copies them to `~/.claude/delegate-jobs/`, a path that does not depend on where the
 plugin is installed.
 

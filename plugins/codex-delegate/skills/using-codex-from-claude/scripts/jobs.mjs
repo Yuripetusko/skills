@@ -6,8 +6,8 @@
 // DELEGATE_JOBS_DIR) holding brief.md, meta.json, out.md, err.log and, for agy, events.jsonl. The
 // parent session and the user find jobs there without knowing which relay launched them, and
 // ROOT/jobs.mjs is a copy of this script at a path that does not depend on how the plugin is installed.
-// Commands whose logic lives in a sibling module (SIBLINGS) load it with a dynamic import, and `new`
-// copies those modules next to ROOT/jobs.mjs.
+// jobs.mjs imports clean-line.mjs, commands whose logic lives in a sibling module load it with a dynamic
+// import, and `new` copies these modules (SIBLINGS) next to ROOT/jobs.mjs.
 
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
@@ -15,12 +15,13 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { cleanLine } from './clean-line.mjs'
 
 const ROOT = process.env.DELEGATE_JOBS_DIR || path.join(os.homedir(), '.claude', 'delegate-jobs')
 const KEEP_JOBS = 50
 const KEEP_DAYS = 7
 const SIGNALS = { SIGHUP: 1, SIGINT: 2, SIGTERM: 15 }
-const SIBLINGS = ['diff.mjs', 'gate.mjs']
+const SIBLINGS = ['clean-line.mjs', 'diff.mjs', 'gate.mjs']
 
 const USAGE = `Usage: node jobs.mjs <command>
   new <tool> [--label <text>]          create a job dir under ${ROOT}, print its path
@@ -133,7 +134,8 @@ function cmdNew(args) {
   fs.mkdirSync(ROOT, { recursive: true })
   prune()
   const self = fileURLToPath(import.meta.url)
-  for (const name of ['jobs.mjs', ...SIBLINGS]) {
+  // jobs.mjs last, so ROOT/jobs.mjs never imports a module that isn't there yet.
+  for (const name of [...SIBLINGS, 'jobs.mjs']) {
     const from = path.join(path.dirname(self), name)
     const to = path.join(ROOT, name)
     if (from !== to && fs.existsSync(from) && fs.readFileSync(from, 'utf8') !== (fs.existsSync(to) ? fs.readFileSync(to, 'utf8') : ''))
@@ -371,15 +373,6 @@ function cmdJobs(args) {
   }
   console.log(`\nProgress: node ${home(path.join(ROOT, 'jobs.mjs'))} tail <job>   Stop: … cancel <job>`)
 }
-
-// A progress line can carry text from outside the hooks: a command's first output line, agy's stderr, an
-// error message. It reaches terminals and an orchestrator's Monitor stream, so escape sequences (CSI,
-// OSC and the other two-character ones) and control characters, including the C1 range, line and
-// paragraph separators and the bidi and zero-width marks, are dropped, then runs of white space shrink.
-const ESCAPES = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[ -/]*[0-~])/g
-const CONTROLS = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u206f\ufeff]/g
-export const cleanLine = (text, max = 240) =>
-  String(text).replace(ESCAPES, ' ').replace(CONTROLS, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
 
 // agy's stream has no hook events, so the gate's hooks write progress.jsonl themselves: one line when a
 // gate check or a verifier run starts and ends. `offset` is the size of events.jsonl when the line was

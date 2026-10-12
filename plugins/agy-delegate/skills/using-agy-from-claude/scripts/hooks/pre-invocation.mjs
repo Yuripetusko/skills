@@ -18,7 +18,10 @@ try {
     } catch {}
     if (current?.run !== run) {
       const input = JSON.parse(raw || '{}')
-      const canary = { run, agent: readState(dir).agent, at: new Date().toISOString(), conversationId: input.conversationId, model: input.modelName }
+      // agy 1.3.3's input names no agent, so the agent from state.json stands in; agy-run.mjs checks the
+      // stream's init event for the agent that really ran.
+      const named = [input.agentName, input.agent].find(a => typeof a === 'string' && a)
+      const canary = { run, agent: named ?? readState(dir).agent, at: new Date().toISOString(), conversationId: input.conversationId, model: input.modelName }
       fs.writeFileSync(file, `${JSON.stringify(canary)}\n`)
       logLine(dir, { hook: 'PreInvocation', decision: 'loaded', agent: canary.agent, keys: Object.keys(input) })
     }

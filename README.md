@@ -81,9 +81,9 @@ finishes each lint and type-check run and verifier run, so a long check doesn't 
 lines give the findings added, the verifier's model and any timeout, and `--every` doesn't condense
 them. `jobs` shows the verifier verdict beside the gate verdict.
 
-`jobs.mjs`, `diff.mjs` and `gate.mjs` are shared by both plugins, with an identical copy in each; check them with
+`jobs.mjs`, `clean-line.mjs`, `diff.mjs` and `gate.mjs` are shared by both plugins, with an identical copy in each; check them with
 `cmp plugins/agy-delegate/skills/using-agy-from-claude/scripts/jobs.mjs plugins/codex-delegate/skills/using-codex-from-claude/scripts/jobs.mjs`
-(and the same for `diff.mjs` and `gate.mjs`). Each new job refreshes the copies in `~/.claude/delegate-jobs/`.
+(and the same for `clean-line.mjs`, `diff.mjs` and `gate.mjs`). Each new job refreshes the copies in `~/.claude/delegate-jobs/`.
 `delegate-jobs diff --job <job>` writes a numbered diff, the changed files and the applicable
 `AGENTS.md` files for a job's change; `--pr <n>` does the same for a GitHub PR.
 

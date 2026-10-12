@@ -15,7 +15,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { snapshotTree } from './gate.mjs'
-import { CANARY, GATE_DEADLINE_S, progress, readHookLog, readState, ROUND_CAP, runGate, STOP_TIMEOUT_S, stateHash, VERIFIER_DEADLINE_S, writeState } from './hooks/job.mjs'
+import { CANARY, progress, readHookLog, readState, ROUND_CAP, runGate, runTimeouts, STOP_TIMEOUT_S, stateHash, writeState } from './hooks/job.mjs'
 import { checkRound, coveredTree, VERIFIER_AGENT, VERIFIER_MODEL, verifierSummary, writeVerifierConfig } from './hooks/verifier.mjs'
 import { updateMeta } from './jobs.mjs'
 
@@ -611,20 +611,16 @@ async function run(opts) {
     if (vproblem) setupFailed(`the verifier's config did not load: ${vproblem}`)
   }
 
-  // agy's turn limit. With a gate, it also covers ROUND_CAP + 1 Stop hook runs (gate check plus
-  // verifier), in case hook time counts against --print-timeout, and the guard allows for them once
-  // more in case it doesn't. Both stay inside MAX_TIMEOUT_S from the runner's start, less one check and
-  // verifier run the runner may do after agy exits, so the relay's 2 h Bash call outlives the job.
-  let printS = timeoutS
-  let guardS = timeoutS + GUARD_S
-  if (gate?.configured) {
-    const reserve = (ROUND_CAP + 1) * STOP_TIMEOUT_S
-    const budget = Math.max(60, MAX_TIMEOUT_S - GATE_DEADLINE_S - VERIFIER_DEADLINE_S - Math.round((Date.now() - started) / 1000))
-    printS = Math.min(timeoutS + reserve, budget)
-    guardS = Math.min(printS + reserve, budget) + GUARD_S
-    if (printS < timeoutS + reserve)
-      log(`print-timeout capped at ${printS}s: ${timeoutS}s of work plus ${reserve}s for gate rounds would end past ${MAX_TIMEOUT_S / 60}m`)
-  }
+  // agy's turn limit and the runner's guard; see runTimeouts. The relay's 2 h Bash call outlives the job.
+  const { printS, guardS, capped } = runTimeouts({
+    timeoutS,
+    gate: Boolean(gate?.configured),
+    elapsedS: Math.ceil((Date.now() - started) / 1000),
+    maxS: MAX_TIMEOUT_S,
+    graceS: GUARD_S,
+  })
+  if (capped)
+    log(`print-timeout capped at ${printS}s: ${timeoutS}s of work plus ${(ROUND_CAP + 1) * STOP_TIMEOUT_S}s for gate rounds would end past ${MAX_TIMEOUT_S / 60}m`)
 
   const prompt = [
     read(path.join(SKILL_DIR, 'prompts', 'preamble.md')).trim(),
@@ -682,6 +678,8 @@ async function run(opts) {
   const guard = setTimeout(() => stop('guard'), guardS * 1000)
   for (const sig of Object.keys(SIGNALS)) process.on(sig, () => stop(sig))
   // agy must bind to this checkout. It did on 1.3.3; fail fast if a later version picks another root.
+  // It must also run the job's agent: for an agent it can't load, agy runs its default one, whose
+  // prompt and tool list are not the job's.
   const checkBinding = () => {
     const init = readEvents(eventsFile, eventsStart).find(e => e.event === 'init')?.init
     if (!init) return false
@@ -690,6 +688,7 @@ async function run(opts) {
       bound = fs.realpathSync(init.cwd)
     } catch {}
     if (bound !== realCwd) stop(`workspace ${init.cwd}`)
+    else if (init.agent !== agent) stop(`agent ${init.agent ?? '(none)'}`)
     return true
   }
   const watcher = setInterval(() => checkBinding() && clearInterval(watcher), 1000)
@@ -734,6 +733,8 @@ async function run(opts) {
     let why
     if (SIGNALS[stopReason]) [exit, why] = [128 + SIGNALS[stopReason], `runner got ${stopReason}; agy was stopped`]
     else if (stopReason?.startsWith('workspace')) [exit, why] = [EXIT.failed, `agy bound to ${stopReason.slice(10)}, not ${cwd}`]
+    else if (stopReason?.startsWith('agent '))
+      [exit, why] = [EXIT.setup, `job rules did not load: agy ran agent "${stopReason.slice(6)}", not "${agent}", and was stopped`]
     else if (stopReason === 'setup')
       [exit, why] = [EXIT.setup, `job rules did not load: agy finished a step with no canary ($JOB/${CANARY}) and was stopped`]
     else if (stopReason === 'guard') [exit, why] = [EXIT.timeout, `agy outlived --print-timeout by ${guardS - printS}s and was killed`]

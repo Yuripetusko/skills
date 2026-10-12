@@ -422,6 +422,7 @@ describe('delegate-jobs diff with --job', () => {
     const root = path.join(scratch, 'old-root')
     fs.mkdirSync(root, { recursive: true })
     fs.copyFileSync(JOBS, path.join(root, 'jobs.mjs'))
+    fs.copyFileSync(path.join(path.dirname(JOBS), 'clean-line.mjs'), path.join(root, 'clean-line.mjs'))
     const r = spawnSync(process.execPath, [path.join(root, 'jobs.mjs'), 'diff', '--base', 'HEAD'], { cwd: repo, env: { ...baseEnv, DELEGATE_JOBS_DIR: root }, encoding: 'utf8' })
     assert.notEqual(r.status, 0)
     assert.match(r.stderr, /diff\.mjs is missing/)

@@ -113,6 +113,13 @@ test('an unknown --agent name exits 18 before launch', () => {
   assert.match(r.stderr, /agy -p \/agents` does not list agent "no-such-agent"/)
 })
 
+test('a run whose init event names another agent exits 18: agy fell back from delegate-implementer', () => {
+  const ctx = setup()
+  const r = run(ctx, { FAKE_INIT_AGENT: 'default' })
+  assert.equal(r.status, 18, r.report)
+  assert.match(r.report, /job rules did not load: agy ran agent "default", not "delegate-implementer"/)
+})
+
 test('a failed /hooks or /agents call exits 18 and names the call, even with JSON printed', () => {
   const ctx = setup()
   let r = run(ctx, { FAKE_SLASH_FAIL: 'hooks:exit' })

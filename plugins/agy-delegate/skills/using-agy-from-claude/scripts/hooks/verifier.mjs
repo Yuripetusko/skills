@@ -149,20 +149,29 @@ export async function runVerifier({
   args.push('--add-dir', path.join(dir, 'agy-verifier'), '--agent', VERIFIER_AGENT, '--json-schema', SCHEMA)
   args.push('--dangerously-skip-permissions', '--print-timeout', `${VERIFIER_PRINT_S}s`)
   let timedOut = false
+  // The verifier is no gated job, so it doesn't get the implementer's AGY_DELEGATE_GATE.
+  const { AGY_DELEGATE_GATE, ...inherited } = process.env
   const outcome = await new Promise(resolve => {
-    const child = spawn(agy, args, {
-      cwd: worktree, // never the hook's cwd, which holds the implementer's hooks.json
-      detached: true,
-      env: {
-        ...process.env,
-        AGY_DELEGATE_JOB: dir,
-        AGY_DELEGATE_RUN: run ?? '',
-        AGY_DELEGATE_STATE_SHA: stateSha ?? '',
-        AGY_DELEGATE_ROLE: 'verifier',
-        AGY_DELEGATE_VERIFIER_INPUT: input,
-      },
-      stdio: [fs.openSync(message, 'r'), fs.openSync(events, 'w'), fs.openSync(stderr, 'w')],
-    })
+    const stdio = [fs.openSync(message, 'r'), fs.openSync(events, 'w'), fs.openSync(stderr, 'w')]
+    let child
+    try {
+      child = spawn(agy, args, {
+        cwd: worktree, // never the hook's cwd, which holds the implementer's hooks.json
+        detached: true,
+        env: {
+          ...inherited,
+          AGY_DELEGATE_JOB: dir,
+          AGY_DELEGATE_RUN: run ?? '',
+          AGY_DELEGATE_STATE_SHA: stateSha ?? '',
+          AGY_DELEGATE_ROLE: 'verifier',
+          AGY_DELEGATE_VERIFIER_INPUT: input,
+        },
+        stdio,
+      })
+    } finally {
+      // The child has its own copies.
+      for (const fd of stdio) fs.closeSync(fd)
+    }
     say(`verifier started: ${model}, pid ${child.pid}, stopped after ${deadlineS}s`)
     const kill = sig => {
       try {

@@ -416,13 +416,21 @@ export function delta(before, after, renames = {}) {
 }
 
 // Working-tree state as a tree object, built in a scratch index so the real index is never touched.
+// The copy reuses the real index's stat cache, and keeps its mtime: git compares the contents of any
+// entry not older than the index, and a copy with a newer mtime would pass a same-size edit made in
+// the same second as the entry was cached. `update-index --really-refresh` does not help there, since
+// it judges racy entries by the same mtime. The mtime is rounded down, which only adds racy entries.
 export function snapshotTree(root, scratch) {
   fs.mkdirSync(scratch, { recursive: true })
   const index = path.join(scratch, `index-${process.pid}`)
   const env = { ...process.env, GIT_INDEX_FILE: index }
   try {
     const real = git(['rev-parse', '--path-format=absolute', '--git-path', 'index'], root).trim()
-    if (fs.existsSync(real)) fs.copyFileSync(real, index)
+    if (fs.existsSync(real)) {
+      fs.copyFileSync(real, index)
+      const { atimeMs, mtimeMs } = fs.statSync(real)
+      fs.utimesSync(index, new Date(Math.floor(atimeMs)), new Date(Math.floor(mtimeMs)))
+    }
     git(['add', '-A'], root, env)
     return git(['write-tree'], root, env).trim()
   } finally {

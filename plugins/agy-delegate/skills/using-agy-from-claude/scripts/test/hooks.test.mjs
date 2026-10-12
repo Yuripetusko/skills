@@ -448,6 +448,32 @@ test('plan files match without regard to case', () => {
   assert.equal(write(ctx, 'docs/tickets.md', { paths: ['**'] }).decision, 'allow')
 })
 
+test('pre-invocation records the agent its input names, else the one state.json names', () => {
+  const ctx = makeJob()
+  runHook('pre-invocation.mjs', '{"conversationId": "c1", "modelName": "m"}', ctx)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ctx.job, 'loaded'), 'utf8')).agent, 'delegate-implementer')
+  runHook('pre-invocation.mjs', '{"conversationId": "c1", "agentName": "default"}', ctx, { AGY_DELEGATE_RUN: 'run-2' })
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ctx.job, 'loaded'), 'utf8')).agent, 'default')
+  assert.equal(hookLog(ctx.job).at(-1).agent, 'default')
+})
+
+test('pre-tool.mjs prints a decision when jobs.mjs cannot load', () => {
+  const ctx = makeJob()
+  // The scripts dir, minus the tests, with a jobs.mjs that throws on import.
+  const scripts = path.join(ctx.root, 'scripts')
+  fs.cpSync(path.join(HOOKS, '..'), scripts, { recursive: true, filter: src => path.basename(src) !== 'test' })
+  fs.writeFileSync(path.join(scripts, 'jobs.mjs'), "throw new Error('jobs.mjs must not load')\n")
+  const input = fs.readFileSync(path.join(FIXTURES, 'write-in-scope.json'), 'utf8').replaceAll('{{worktree}}', ctx.worktree).replaceAll('{{agyDir}}', ctx.agyDir)
+  const r = spawnSync(process.execPath, [path.join(scripts, 'hooks', 'pre-tool.mjs')], {
+    input,
+    encoding: 'utf8',
+    cwd: path.join(ctx.agyDir, '.agents'),
+    env: { ...process.env, AGY_DELEGATE_JOB: ctx.job, AGY_DELEGATE_RUN: 'run-1', AGY_DELEGATE_STATE_SHA: ctx.sha, AGY_DELEGATE_ROLE: '' },
+  })
+  assert.equal(r.status, 0, r.stderr)
+  assert.deepEqual(JSON.parse(r.stdout), { decision: 'allow' })
+})
+
 test('the inlined glob matcher agrees with jobs.mjs', () => {
   for (const glob of ['src/**', '**/*.ts', 'apps/*/src/**/*.tsx', 'a?b.md', 'docs/x (1).md', '**'])
     assert.equal(globToRegExp(glob).source, jobsGlob(glob).source, glob)
