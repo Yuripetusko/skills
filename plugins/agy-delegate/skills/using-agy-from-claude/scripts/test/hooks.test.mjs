@@ -111,6 +111,88 @@ test('read-only task job denies every write and still allows reads and safe comm
   assert.equal(replay('run-command-claude.json', ctx).decision, 'deny')
 })
 
+// call_mcp_tool's args are from a live agy 1.3.3 run (ServerName, ToolName, Arguments, toolAction,
+// toolSummary), with made-up values. Headless agy declares no browser tools, so that fixture is a guess.
+test('task jobs get an explicit allow for MCP and browser calls, read-only ones too', () => {
+  for (const state of [{ mode: 'task', readOnly: false, paths: [] }, { mode: 'task', readOnly: true, paths: [] }]) {
+    const ctx = makeJob(state)
+    assert.deepEqual(replay('call-mcp-tool.json', ctx), { decision: 'allow' })
+    assert.deepEqual(replay('browser-get-dom.json', ctx), { decision: 'allow' })
+    assert.deepEqual(
+      hookLog(ctx.job).map(e => [e.decision, e.tool, e.target]),
+      [
+        ['allow', 'call_mcp_tool', 'example-server/listItems'],
+        ['allow', 'browser_get_dom', ''],
+      ],
+    )
+  }
+})
+
+test('implement jobs deny call_mcp_tool, logged with server and tool, and allow the rest', () => {
+  const ctx = makeJob()
+  const answer = replay('call-mcp-tool.json', ctx)
+  assert.equal(answer.decision, 'deny')
+  assert.match(answer.reason, /mcp/)
+  assert.deepEqual(replay('browser-get-dom.json', ctx), { decision: 'allow' })
+  assert.deepEqual(
+    hookLog(ctx.job).map(e => [e.decision, e.rule, e.tool, e.target]),
+    [
+      ['deny', 'mcp', 'call_mcp_tool', 'example-server/listItems'],
+      ['allow', undefined, 'browser_get_dom', ''],
+    ],
+  )
+})
+
+const mcp = (server, tool, state) => decide({ name: 'call_mcp_tool', args: { ServerName: server, ToolName: tool, Arguments: {} } }, state)
+const READ_ONLY_TASK = { mode: 'task', readOnly: true, worktree: '/w', paths: [] }
+
+test('read-only task jobs deny MCP tools that name a write, and allow reads', () => {
+  const denied = ['filesystem/write_file', 'linear/create_issue', 'x/deleteDataset', 'x/update-monitor', 'x/get_or_create_user', 'x/posts.add', 'x/sendFeedback', 'x/mergePullRequests', 'x/closes_issue']
+  for (const name of denied) {
+    const [server, tool] = name.split('/')
+    const d = mcp(server, tool, READ_ONLY_TASK)
+    assert.equal(d.decision, 'deny', name)
+    assert.equal(d.rule, 'mcp-write', name)
+    assert.equal(d.target, name)
+  }
+  const allowed = ['linear/get_issue', 'axiom/queryDataset', 'x/listOrganizations', 'x/search_docs', 'x/fetch-page', 'x/describeTable', 'x/read_file', 'x/findFiles', 'x/settings', 'x/outputs']
+  for (const name of allowed) {
+    const [server, tool] = name.split('/')
+    assert.equal(mcp(server, tool, READ_ONLY_TASK).decision, 'allow', name)
+  }
+  assert.match(mcp('filesystem', 'write_file', READ_ONLY_TASK).reason, /read-only.*write_file.*write/)
+})
+
+test('MCP write verbs stay allowed in a task job that is not read-only', () => {
+  assert.equal(mcp('linear', 'create_issue', TASK).decision, 'allow')
+  assert.equal(mcp('filesystem', 'write_file', { ...TASK, readOnly: false }).decision, 'allow')
+  assert.equal(mcp('linear', 'get_issue', IMPLEMENT).rule, 'mcp')
+  assert.equal(mcp('linear', 'get_issue', { ...IMPLEMENT, readOnly: true }).rule, 'mcp')
+})
+
+test('a read-only MCP name with no read or write verb is allowed and logged, a read is not flagged', () => {
+  const ctx = makeJob({ mode: 'task', readOnly: true, paths: [] })
+  const call = (server, tool) => JSON.stringify({ toolCall: { name: 'call_mcp_tool', args: { ServerName: server, ToolName: tool, Arguments: {} } } })
+  assert.deepEqual(runHook('pre-tool.mjs', call('x', 'frobnicate'), ctx), { decision: 'allow' })
+  assert.deepEqual(runHook('pre-tool.mjs', call('x', 'listItems'), ctx), { decision: 'allow' })
+  assert.equal(runHook('pre-tool.mjs', call('filesystem', 'write_file'), ctx).decision, 'deny')
+  assert.deepEqual(
+    hookLog(ctx.job).map(e => [e.decision, e.rule, e.note, e.target]),
+    [
+      ['allow', undefined, 'mcp-unclassified', 'x/frobnicate'],
+      ['allow', undefined, undefined, 'x/listItems'],
+      ['deny', 'mcp-write', undefined, 'filesystem/write_file'],
+    ],
+  )
+})
+
+test('a broken job denies call_mcp_tool too, and still allows the browser', () => {
+  const ctx = makeJob({ mode: 'task' })
+  fs.rmSync(path.join(ctx.job, 'state.json'))
+  assert.equal(replay('call-mcp-tool.json', ctx).decision, 'deny')
+  assert.deepEqual(replay('browser-get-dom.json', ctx), { decision: 'allow' })
+})
+
 test('a broken job fails closed for commands and writes, open for reads', () => {
   const ctx = makeJob()
   fs.rmSync(path.join(ctx.job, 'state.json'))

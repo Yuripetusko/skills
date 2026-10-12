@@ -203,6 +203,25 @@ export const COMMAND_RULES = [
   { id: 'dependencies', modes: ['implement'], test: dependencyChange, why: 'adding, removing, updating or installing dependencies is blocked' },
 ]
 
+// Rules on a tool by name. agy adds MCP tools whatever the `tools` allowlist says, so a rule keeps them out of implement jobs.
+export const TOOL_RULES = [
+  {
+    id: 'mcp',
+    modes: ['implement'],
+    tools: new Set(['call_mcp_tool']),
+    why: 'MCP calls can change things outside the checkout; implement jobs make none',
+  },
+]
+const GUARDED_TOOLS = new Set(TOOL_RULES.flatMap(r => [...r.tools]))
+const mcpTarget = args => (args.ServerName ? `${args.ServerName}/${args.ToolName ?? ''}` : '')
+
+// A read-only job may call an MCP tool unless its name has a write verb as a word. No verb at all: allowed and logged.
+const MCP_WRITE_VERBS = new Set(['write', 'create', 'update', 'delete', 'remove', 'edit', 'move', 'rename', 'post', 'put', 'patch', 'set', 'insert', 'upsert', 'send', 'comment', 'add', 'archive', 'close', 'merge'])
+const MCP_READ_VERBS = new Set(['list', 'get', 'read', 'search', 'query', 'find', 'fetch', 'describe'])
+// Words of a tool name: write_file, writeFile, write-file and write.file all give [write, file].
+const nameWords = name => String(name ?? '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+const verbIn = (words, verbs) => words.find(w => [w, w.replace(/s$/, ''), w.replace(/es$/, '')].some(v => verbs.has(v)))
+
 // Case-insensitive: macOS file systems treat spec.md and SPEC.md as one file.
 const PLAN_FILE = /(^|-)ticket\.md$|^(map|spec)\.md$/i
 
@@ -293,9 +312,17 @@ function mentionsJob(line, state) {
   return [...forms].some(dir => line.includes(dir))
 }
 
-// Returns {decision, rule?, reason?, target} for one tool call under the job's state.
+// Returns {decision, rule?, reason?, target} for one tool call under the job's state. A tool no rule covers gets an explicit allow.
 export function decide(call, state) {
   const args = call?.args ?? {}
+  const toolRule = TOOL_RULES.find(r => r.modes.includes(state.mode) && r.tools.has(call?.name))
+  if (toolRule) return blocked(toolRule, call.name === 'call_mcp_tool' ? mcpTarget(args) : '')
+  if (call?.name === 'call_mcp_tool' && state.readOnly) {
+    const words = nameWords(args.ToolName)
+    const write = verbIn(words, MCP_WRITE_VERBS)
+    if (write) return blocked({ id: 'mcp-write', why: `this job is read-only, and the MCP tool ${args.ToolName} names a write (${write})` }, mcpTarget(args))
+    if (!verbIn(words, MCP_READ_VERBS)) return { decision: 'allow', target: mcpTarget(args), note: 'mcp-unclassified' }
+  }
   if (call?.name === 'run_command') {
     const line = String(args.CommandLine ?? '')
     if (mentionsJob(line, state)) return blocked(JOB_FILES, line)
@@ -323,7 +350,7 @@ export function decide(call, state) {
     const rule = rules.find(r => r.test(file, state))
     return rule ? blocked(rule, abs) : { decision: 'allow', target: abs }
   }
-  const target = args.AbsolutePath ?? args.SearchPath ?? args.DirectoryPath ?? args.Query ?? ''
+  const target = args.AbsolutePath ?? args.SearchPath ?? args.DirectoryPath ?? args.Query ?? mcpTarget(args)
   return { decision: 'allow', target: String(target) }
 }
 
@@ -367,12 +394,12 @@ async function main() {
           ? decideVerifier(call, verifierRoots(dir, state))
           : decide(call, state)
     const target = d.target.length > 300 ? `${d.target.slice(0, 297)}...` : d.target
-    logLine(dir, { hook: 'PreToolUse', ...role, decision: d.decision, rule: d.rule, tool: call?.name, target, ...(target ? {} : { keys: Object.keys(call?.args ?? {}) }) })
+    logLine(dir, { hook: 'PreToolUse', ...role, decision: d.decision, rule: d.rule, note: d.note, tool: call?.name, target, ...(target ? {} : { keys: Object.keys(call?.args ?? {}) }) })
     console.log(JSON.stringify(d.decision === 'deny' ? { decision: 'deny', reason: d.reason } : { decision: 'allow' }))
   } catch (error) {
     // Fail closed for the calls the rules cover, open for the rest. The verifier's rules cover every
     // call except `finish`.
-    const covered = !call || call.name === 'run_command' || isWrite(call) || (role.role && call.name !== 'finish')
+    const covered = !call || call.name === 'run_command' || GUARDED_TOOLS.has(call.name) || isWrite(call) || (role.role && call.name !== 'finish')
     const reason = `Blocked by job rules: the rule check failed (${error.message}).`
     console.log(JSON.stringify(covered ? { decision: 'deny', reason } : { decision: 'allow' }))
     try {
