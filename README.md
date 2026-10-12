@@ -42,6 +42,13 @@ remain, or the gate can't run, the job exits 17 (`gate`). The relay's report lea
 verdict: `GATE OK`, `GATE FAILED`, `GATE ERROR` or `GATE: not configured`. The config format is in
 [gate-config.md](plugins/agy-delegate/skills/using-agy-from-claude/references/gate-config.md).
 
+**These gates are opinionated.** They grew out of one pnpm and turbo monorepo that uses oxlint and
+`tsc -b`, so the gate parses those two tools' output, and the agy job rules block what went wrong
+there: git state changes, other AI CLIs, dependency installs, writes outside `paths:`, and edits to
+ticket files. The commands come from each repo's config, but other linters, other type checkers and
+switching individual rules off aren't supported yet. Pull requests that make them configurable are
+welcome.
+
 **Permissions.** agy runs with `--dangerously-skip-permissions`, and Codex write jobs use its
 `workspace-write` sandbox, the same trust as running Claude in auto mode with whole-project access.
 Scope comes from the brief and from the checks afterwards:
