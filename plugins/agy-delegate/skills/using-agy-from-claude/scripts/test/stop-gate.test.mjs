@@ -480,6 +480,37 @@ test('runVerifier: without the job env its hook denies the input read, and no PA
   }
 })
 
+// A changed worktree with the verifier config written, for calling runVerifier in this process.
+function verifierJob() {
+  const ctx = setup()
+  fs.writeFileSync(path.join(ctx.repo, 'pkg', 'src', 'b.ts'), 'export const b = 1\n')
+  const state = { job: ctx.job, worktree: ctx.repo, mode: 'implement', readOnly: false, paths: ['pkg/src/**'], agent: 'delegate-implementer' }
+  writeState(ctx.job, state)
+  writeVerifierConfig(ctx.job, { model: 'gemini-3.8-flash-medium', worktree: ctx.repo })
+  return { ctx, base: { dir: ctx.job, worktree: ctx.repo, agy: FAKE_AGY, model: 'gemini-3.8-flash-medium', run: 'run-1', stateSha: stateHash(state) } }
+}
+
+test('runVerifier leaves no file descriptors open for the verifier stdio', async () => {
+  const { base } = verifierJob()
+  const open = () => fs.readdirSync('/dev/fd').length
+  const before = open()
+  for (const n of [1, 2]) assert.equal((await runVerifier({ ...base, n })).verdict, 'PASS')
+  assert.equal(open(), before)
+})
+
+test('the verifier runs without AGY_DELEGATE_GATE', async () => {
+  const { ctx, base } = verifierJob()
+  const log = path.join(ctx.root, 'verifier-runs.jsonl')
+  Object.assign(process.env, { AGY_DELEGATE_GATE: '1', FAKE_VERIFIER_LOG: log })
+  try {
+    assert.equal((await runVerifier({ ...base, n: 1 })).verdict, 'PASS')
+  } finally {
+    delete process.env.AGY_DELEGATE_GATE
+    delete process.env.FAKE_VERIFIER_LOG
+  }
+  assert.equal(JSON.parse(fs.readFileSync(log, 'utf8')).hasGate, false)
+})
+
 test('a FAILED gate check runs no verifier', () => {
   const ctx = changed()
   const r = run(ctx, verified('1,0', 'PASS', logVerifier(ctx)))

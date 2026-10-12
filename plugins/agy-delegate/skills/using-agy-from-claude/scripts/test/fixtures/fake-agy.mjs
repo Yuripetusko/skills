@@ -98,7 +98,7 @@ if (opt('--agent') === 'delegate-verifier') {
   const answers = (env.FAKE_VERIFIER ?? 'PASS').split(',')
   const answer = answers[Math.min(round, answers.length) - 1]
   if (env.FAKE_VERIFIER_LOG)
-    fs.appendFileSync(env.FAKE_VERIFIER_LOG, `${JSON.stringify({ round, cwd, args: argv, role: env.AGY_DELEGATE_ROLE, input, answer })}\n`)
+    fs.appendFileSync(env.FAKE_VERIFIER_LOG, `${JSON.stringify({ round, cwd, args: argv, role: env.AGY_DELEGATE_ROLE, hasGate: 'AGY_DELEGATE_GATE' in env, input, answer })}\n`)
   // Returns true when every hook allowed the call.
   const tool = (name, args) => {
     const decisions = handlers('PreToolUse').map(h => callHook(h, { ...common, toolCall: { name, args } }))
