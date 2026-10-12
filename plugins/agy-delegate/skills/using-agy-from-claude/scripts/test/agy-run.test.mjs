@@ -40,10 +40,10 @@ function setup() {
   return { root, repo, job, calls }
 }
 
-function run(ctx, env = {}) {
+function run(ctx, env = {}, modeArgs = ['--mode', 'implement']) {
   const r = spawnSync(
     process.execPath,
-    [RUNNER, 'run', '--job-dir', ctx.job, '--mode', 'implement', '--model', 'gemini-3.8-flash-low', '--timeout', '2m'],
+    [RUNNER, 'run', '--job-dir', ctx.job, ...modeArgs, '--model', 'gemini-3.8-flash-low', '--timeout', '2m'],
     {
       cwd: ctx.repo,
       encoding: 'utf8',
@@ -64,6 +64,46 @@ test('a job blocks claude and the out-of-scope write, keeps the in-scope edit, e
   assert.equal(meta(ctx).blocked, 2)
   assert.ok(fs.existsSync(path.join(ctx.repo, 'src', 'b.ts')))
   assert.ok(!fs.existsSync(path.join(ctx.repo, 'notes')))
+})
+
+// agy adds its MCP tools to any agent whatever the `tools` list says, so task and implement jobs share
+// one agent and the hook tells them apart.
+test('a read-only task job may call MCP and browser tools; its write is blocked', () => {
+  const ctx = setup()
+  fs.writeFileSync(
+    ctx.calls,
+    JSON.stringify([
+      { name: 'call_mcp_tool', args: { ServerName: 'example-server', ToolName: 'listItems', Arguments: {} } },
+      { name: 'browser_get_dom', args: { PageId: 'page-1' } },
+      { name: 'write_to_file', args: { TargetFile: path.join(ctx.repo, 'notes', 'x.md'), CodeContent: 'x\n' } },
+    ]),
+  )
+  const r = run(ctx, {}, ['--mode', 'task', '--read-only'])
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.report, /blocked by job rules \(1\):/)
+  assert.match(r.report, /write_to_file notes\/x\.md \(read-only\)/)
+  assert.equal(meta(ctx).blocked, 1)
+  assert.deepEqual(fs.readdirSync(path.join(ctx.job, 'agy', '.agents', 'agents')), ['delegate-implementer.md'])
+  const log = fs.readFileSync(path.join(ctx.job, 'hook.log'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
+  assert.deepEqual(
+    log.filter(e => e.hook === 'PreToolUse').map(e => [e.decision, e.tool]),
+    [['allow', 'call_mcp_tool'], ['allow', 'browser_get_dom'], ['deny', 'write_to_file']],
+  )
+})
+
+test('an implement job is blocked from call_mcp_tool but not from other tools', () => {
+  const ctx = setup()
+  fs.writeFileSync(
+    ctx.calls,
+    JSON.stringify([
+      { name: 'call_mcp_tool', args: { ServerName: 'example-server', ToolName: 'listItems', Arguments: {} } },
+      { name: 'browser_get_dom', args: { PageId: 'page-1' } },
+    ]),
+  )
+  const r = run(ctx)
+  assert.equal(r.status, 0, r.stderr)
+  assert.match(r.report, /blocked by job rules \(1\):/)
+  assert.match(r.report, /call_mcp_tool example-server\/listItems \(mcp\)/)
 })
 
 test('an unknown --agent name exits 18 before launch', () => {

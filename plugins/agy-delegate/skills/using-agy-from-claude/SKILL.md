@@ -28,16 +28,23 @@ to you. The agent definition that preloaded this skill says which mode you run: 
 
 The runner writes an agy config for each job to `<dir>/agy/`: a main agent, `delegate-implementer`,
 and hooks. It launches agy with `--add-dir <dir>/agy --agent delegate-implementer`, so nothing goes
-into the checkout or into agy's global config. The agent has no subagent, browser or MCP tools. The
-hooks block these calls:
+into the checkout or into agy's global config. The agent's `tools` list leaves out the subagent tools.
+Task and implement jobs run as the same agent, and the hooks tell them apart. The hooks block these
+calls:
 
 - In every job: git commands that change repository state (commit, push, reset, checkout, stash,
   merge and the like), other AI CLIs (`claude`, `codex`, `gemini`, `agy`, `coderabbit`), and shell
   commands that name the job dir. If the job's `state.json` changes during the run, every call is
   blocked.
-- In implement jobs: `gh` commands that write to GitHub, dependency installs and changes, and file
-  writes outside the worktree, outside `paths:`, or to ticket files, `MAP.md` and `SPEC.md`.
+- In implement jobs: `gh` commands that write to GitHub, dependency installs and changes, MCP tool
+  calls (`call_mcp_tool`), and file writes outside the worktree, outside `paths:`, or to ticket
+  files, `MAP.md` and `SPEC.md`.
 - In read-only jobs: every file write.
+
+Task jobs can call the MCP servers configured in agy, also when read-only, because agy adds its MCP
+tools to an agent whatever the agent's `tools` list says. They can also run `gh` reads and writes and
+dependency commands. In print mode agy 1.3.3 offered no browser tools, so a task job cannot drive a
+browser.
 
 agy sees the reason for each block. The runner's report lists them under "blocked by job rules", and
 `<dir>/hook.log` has every decision. Matching a command line stops accidents, not intent: a script
@@ -281,6 +288,22 @@ come from the current checkout, not from the PR's head.
   `tools` names any of them fails before its first step with "tool ... not found in registry". The
   `/agents` preflight does not catch that. The `init` event lists every tool even when the agent has
   a `tools` allowlist.
+- The registry rejects more names than those three. Probed one at a time, it also rejected
+  `call_mcp_tool`, `list_resources`, `read_resource`, 22 browser tools (every one in the `init` list
+  but `browser_subagent`, which was not probed), `delete_knowledge`, `list_permissions`,
+  `manage_inbox`, `notebook_execution` and `wait_5_seconds`. An allowlist cannot name any of them.
+- MCP tools survive an allowlist. An implement job on `delegate-implementer` made a `call_mcp_tool`
+  step against a configured server and the call succeeded, and the model listed `call_mcp_tool`,
+  `list_resources` and `read_resource` next to the allowlisted tools. The hook sees the call's args as
+  `ServerName`, `ToolName`, `Arguments`, `toolAction` and `toolSummary`. Task jobs therefore need no
+  agent of their own. Implement jobs lose the tool through a hook rule.
+- Print mode offered no browser tools under any agent tried (allowlisted, no allowlist, default). This
+  rests on the model's own tool list and on its answer when asked to call one. No browser tool step
+  ran.
+- A custom agent with no `tools` field lost `run_command` and the write tools under the runner's
+  flags (`--dangerously-skip-permissions`, stream-json stdin, hooks). A probe agent with no `tools`
+  field, run through plain `agy -p` without the flag or hooks, still had `run_command`. The cause was
+  not isolated. Keep the allowlist.
 - The `Stop` hook fires at the final answer (`terminationReason` `NO_TOOL_CALL`) and also mid-job at
   a `wait` step (`TERMINAL_STEP_TYPE`), after which agy carries on. In one run, a mid-job stop's hook
   time showed up in the result's `duration_seconds` and the final stop's did not.

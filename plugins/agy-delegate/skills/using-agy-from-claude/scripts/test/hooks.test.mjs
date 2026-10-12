@@ -111,6 +111,45 @@ test('read-only task job denies every write and still allows reads and safe comm
   assert.equal(replay('run-command-claude.json', ctx).decision, 'deny')
 })
 
+// call_mcp_tool's args are from a live agy 1.3.3 run (ServerName, ToolName, Arguments, toolAction,
+// toolSummary), with made-up values. Headless agy declares no browser tools, so that fixture is a guess.
+test('task jobs get an explicit allow for MCP and browser calls, read-only ones too', () => {
+  for (const state of [{ mode: 'task', readOnly: false, paths: [] }, { mode: 'task', readOnly: true, paths: [] }]) {
+    const ctx = makeJob(state)
+    assert.deepEqual(replay('call-mcp-tool.json', ctx), { decision: 'allow' })
+    assert.deepEqual(replay('browser-get-dom.json', ctx), { decision: 'allow' })
+    assert.deepEqual(
+      hookLog(ctx.job).map(e => [e.decision, e.tool, e.target]),
+      [
+        ['allow', 'call_mcp_tool', 'example-server/listItems'],
+        ['allow', 'browser_get_dom', ''],
+      ],
+    )
+  }
+})
+
+test('implement jobs deny call_mcp_tool, logged with server and tool, and allow the rest', () => {
+  const ctx = makeJob()
+  const answer = replay('call-mcp-tool.json', ctx)
+  assert.equal(answer.decision, 'deny')
+  assert.match(answer.reason, /mcp/)
+  assert.deepEqual(replay('browser-get-dom.json', ctx), { decision: 'allow' })
+  assert.deepEqual(
+    hookLog(ctx.job).map(e => [e.decision, e.rule, e.tool, e.target]),
+    [
+      ['deny', 'mcp', 'call_mcp_tool', 'example-server/listItems'],
+      ['allow', undefined, 'browser_get_dom', ''],
+    ],
+  )
+})
+
+test('a broken job denies call_mcp_tool too, and still allows the browser', () => {
+  const ctx = makeJob({ mode: 'task' })
+  fs.rmSync(path.join(ctx.job, 'state.json'))
+  assert.equal(replay('call-mcp-tool.json', ctx).decision, 'deny')
+  assert.deepEqual(replay('browser-get-dom.json', ctx), { decision: 'allow' })
+})
+
 test('a broken job fails closed for commands and writes, open for reads', () => {
   const ctx = makeJob()
   fs.rmSync(path.join(ctx.job, 'state.json'))

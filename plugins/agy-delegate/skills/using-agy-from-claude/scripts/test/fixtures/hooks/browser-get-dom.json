@@ -1,0 +1,9 @@
+{
+  "conversationId": "00000000-0000-4000-8000-000000000001",
+  "workspacePaths": ["{{agyDir}}", "{{worktree}}"],
+  "transcriptPath": "{{agyDir}}/../transcript.jsonl",
+  "artifactDirectoryPath": "{{agyDir}}/../artifacts",
+  "modelName": "gemini-3.8-flash-low",
+  "toolCall": { "name": "browser_get_dom", "args": { "PageId": "page-1" } },
+  "stepIdx": 5
+}
