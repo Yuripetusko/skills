@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// agy PreToolUse hook: applies the job's deny rules and logs every decision to $JOB/hook.log.
+// agy PreToolUse hook: applies the job's deny rules and logs every decision to $JOB/hook.log. Under
+// AGY_DELEGATE_ROLE=verifier it serves the nested verifier run and allows reads only.
 // agy denies on empty output, a crash or a timeout, so every path prints an explicit decision.
 // Matching a command line stops accidents, not intent: a script file or an alias gets past it.
 
@@ -353,26 +354,61 @@ export function decide(call, state) {
   return { decision: 'allow', target: String(target) }
 }
 
+const VERIFIER_ONLY = { id: 'verifier-read-only', why: 'the verifier may only view and search files and call finish' }
+const VERIFIER_NO_PATH = { id: 'verifier-no-path', why: 'the verifier must name the file or directory it reads' }
+const VERIFIER_OUTSIDE = { id: 'verifier-outside', why: 'the verifier reads only the worktree, its input dir and its config dir' }
+// The verifier's read tools and the argument that holds each one's path, as agy 1.3.3 sends them.
+const VERIFIER_READS = { view_file: 'AbsolutePath', list_dir: 'DirectoryPath', find_by_name: 'SearchDirectory', grep_search: 'SearchPath' }
+const within = (file, root) => file === root || file.startsWith(root.endsWith('/') ? root : `${root}/`)
+
+// The nested verifier run: only the four read tools, each on a path inside `roots`, and `finish`, which
+// carries its verdict. Everything else is denied: commands, writes, MCP and any tool agy adds.
+export function decideVerifier(call, roots) {
+  const args = call?.args ?? {}
+  if (call?.name === 'finish') return { decision: 'allow', target: '' }
+  const key = VERIFIER_READS[call?.name]
+  if (!key) return blocked(VERIFIER_ONLY, call?.name === 'call_mcp_tool' ? mcpTarget(args) : String(args.CommandLine ?? args.TargetFile ?? call?.name ?? ''))
+  if (typeof args[key] !== 'string' || !args[key]) return blocked(VERIFIER_NO_PATH, '')
+  const given = args[key].replace(/^file:\/\//, '')
+  const abs = path.isAbsolute(given) ? resolveTarget(given) : resolveTarget(`${roots[0]}/${given}`)
+  if (abs == null || !roots.some(r => within(abs, r))) return blocked(VERIFIER_OUTSIDE, given)
+  return { decision: 'allow', target: abs }
+}
+
+// The worktree, the round's input dir and the verifier's config dir. A run without its input dir is
+// broken, so every call is denied, `finish` included.
+function verifierRoots(dir, state) {
+  const input = process.env.AGY_DELEGATE_VERIFIER_INPUT
+  if (!input) throw new Error('AGY_DELEGATE_VERIFIER_INPUT is not set')
+  return [state.worktree, input, path.join(dir, 'agy-verifier')].map(r => resolveTarget(r) ?? r)
+}
+
 async function main() {
   const raw = await readStdin()
   let call
+  const role = isVerifier() ? { role: 'verifier' } : {}
   try {
     call = JSON.parse(raw).toolCall
-    if (isVerifier()) return console.log(JSON.stringify({ decision: 'allow' }))
     const dir = jobDir()
     const state = readState(dir)
     // A changed state.json could widen paths:, so every call is denied, reads included.
-    const d = stateHash(state) === process.env.AGY_DELEGATE_STATE_SHA ? decide(call, state) : blocked(STATE_CHANGED, '')
+    const d =
+      stateHash(state) !== process.env.AGY_DELEGATE_STATE_SHA
+        ? blocked(STATE_CHANGED, '')
+        : role.role
+          ? decideVerifier(call, verifierRoots(dir, state))
+          : decide(call, state)
     const target = d.target.length > 300 ? `${d.target.slice(0, 297)}...` : d.target
-    logLine(dir, { hook: 'PreToolUse', decision: d.decision, rule: d.rule, note: d.note, tool: call?.name, target, ...(target ? {} : { keys: Object.keys(call?.args ?? {}) }) })
+    logLine(dir, { hook: 'PreToolUse', ...role, decision: d.decision, rule: d.rule, note: d.note, tool: call?.name, target, ...(target ? {} : { keys: Object.keys(call?.args ?? {}) }) })
     console.log(JSON.stringify(d.decision === 'deny' ? { decision: 'deny', reason: d.reason } : { decision: 'allow' }))
   } catch (error) {
-    // Fail closed for the calls the rules cover, open for the rest.
-    const covered = !call || call.name === 'run_command' || GUARDED_TOOLS.has(call.name) || isWrite(call)
+    // Fail closed for the calls the rules cover, open for the rest. The verifier's rules cover every
+    // call, `finish` included: a verdict from a run whose reads were all denied must not count.
+    const covered = Boolean(role.role) || !call || call.name === 'run_command' || GUARDED_TOOLS.has(call.name) || isWrite(call)
     const reason = `Blocked by job rules: the rule check failed (${error.message}).`
     console.log(JSON.stringify(covered ? { decision: 'deny', reason } : { decision: 'allow' }))
     try {
-      logLine(jobDir(), { hook: 'PreToolUse', decision: covered ? 'deny' : 'allow', rule: 'error', tool: call?.name, error: error.message })
+      logLine(jobDir(), { hook: 'PreToolUse', ...role, decision: covered ? 'deny' : 'allow', rule: 'error', tool: call?.name, error: error.message })
     } catch {}
   }
 }

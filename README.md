@@ -37,9 +37,13 @@ do lint and type-check, unless the target repo has a gate config.
 
 **Lint and type-check gate for agy.** When the target repo commits `.agents/delegate-gate.json`,
 `agy-implementer` records lint and type-check findings before agy starts. A Stop hook checks again
-each time agy tries to finish and sends any new findings back to agy, up to 3 times. If findings
-remain, or the gate can't run, the job exits 17 (`gate`). The relay's report leads with the gate
-verdict: `GATE OK`, `GATE FAILED`, `GATE ERROR` or `GATE: not configured`. The config format is in
+each time agy tries to finish and sends any new findings back to agy, up to 3 times. Once lint and
+type-check are clean, a second, read-only agy run checks the diff against a fixed checklist (true
+`SAFETY:` comments, no behaviour change to fit a type, no cast laundering, no copied helpers, kept
+`unknown` return types, no weakened tests) and the repo's `AGENTS.md` files. Its findings go back
+to agy the same way. If findings remain, or the gate or the verifier can't give a verdict, the job
+exits 17 (`gate`). The relay's report leads with the gate verdict: `GATE OK`, `GATE FAILED`,
+`GATE ERROR` or `GATE: not configured`. The config format is in
 [gate-config.md](plugins/agy-delegate/skills/using-agy-from-claude/references/gate-config.md).
 
 **These gates are opinionated.** They grew out of one pnpm and turbo monorepo that uses oxlint and
