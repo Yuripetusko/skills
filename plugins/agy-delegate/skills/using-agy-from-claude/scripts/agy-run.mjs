@@ -682,6 +682,8 @@ async function run(opts) {
   const guard = setTimeout(() => stop('guard'), guardS * 1000)
   for (const sig of Object.keys(SIGNALS)) process.on(sig, () => stop(sig))
   // agy must bind to this checkout. It did on 1.3.3; fail fast if a later version picks another root.
+  // It must also run the job's agent: for an agent it can't load, agy runs its default one, whose
+  // prompt and tool list are not the job's.
   const checkBinding = () => {
     const init = readEvents(eventsFile, eventsStart).find(e => e.event === 'init')?.init
     if (!init) return false
@@ -690,6 +692,7 @@ async function run(opts) {
       bound = fs.realpathSync(init.cwd)
     } catch {}
     if (bound !== realCwd) stop(`workspace ${init.cwd}`)
+    else if (init.agent !== agent) stop(`agent ${init.agent ?? '(none)'}`)
     return true
   }
   const watcher = setInterval(() => checkBinding() && clearInterval(watcher), 1000)
@@ -734,6 +737,8 @@ async function run(opts) {
     let why
     if (SIGNALS[stopReason]) [exit, why] = [128 + SIGNALS[stopReason], `runner got ${stopReason}; agy was stopped`]
     else if (stopReason?.startsWith('workspace')) [exit, why] = [EXIT.failed, `agy bound to ${stopReason.slice(10)}, not ${cwd}`]
+    else if (stopReason?.startsWith('agent '))
+      [exit, why] = [EXIT.setup, `job rules did not load: agy ran agent "${stopReason.slice(6)}", not "${agent}", and was stopped`]
     else if (stopReason === 'setup')
       [exit, why] = [EXIT.setup, `job rules did not load: agy finished a step with no canary ($JOB/${CANARY}) and was stopped`]
     else if (stopReason === 'guard') [exit, why] = [EXIT.timeout, `agy outlived --print-timeout by ${guardS - printS}s and was killed`]

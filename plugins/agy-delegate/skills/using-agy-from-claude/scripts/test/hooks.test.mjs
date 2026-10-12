@@ -448,6 +448,15 @@ test('plan files match without regard to case', () => {
   assert.equal(write(ctx, 'docs/tickets.md', { paths: ['**'] }).decision, 'allow')
 })
 
+test('pre-invocation records the agent its input names, else the one state.json names', () => {
+  const ctx = makeJob()
+  runHook('pre-invocation.mjs', '{"conversationId": "c1", "modelName": "m"}', ctx)
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ctx.job, 'loaded'), 'utf8')).agent, 'delegate-implementer')
+  runHook('pre-invocation.mjs', '{"conversationId": "c1", "agentName": "default"}', ctx, { AGY_DELEGATE_RUN: 'run-2' })
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ctx.job, 'loaded'), 'utf8')).agent, 'default')
+  assert.equal(hookLog(ctx.job).at(-1).agent, 'default')
+})
+
 test('the inlined glob matcher agrees with jobs.mjs', () => {
   for (const glob of ['src/**', '**/*.ts', 'apps/*/src/**/*.tsx', 'a?b.md', 'docs/x (1).md', '**'])
     assert.equal(globToRegExp(glob).source, jobsGlob(glob).source, glob)

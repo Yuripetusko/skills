@@ -25,6 +25,8 @@
 //                   SIGKILL). Like a model that saw nothing, it answers FAIL when its hook denies
 //                   the read of diff-numbered.txt or the file is missing.
 // FAKE_VERIFIER_LOG file that gets one JSON line per verifier run: round, cwd, args and env
+// FAKE_INIT_AGENT   the agent the init event names, as when agy falls back to another agent
+// FAKE_INVOCATION_AGENT  an agentName field for the PreInvocation input (agy 1.3.3 sends none)
 // Like agy 1.3.3, a Stop hook that exits non-zero, prints no JSON or times out lets the run stop, and
 // the 11th consecutive continue is ignored. Each Stop answer is logged as a `fake_stop_hook` event.
 
@@ -75,7 +77,7 @@ if (argv[0] === '-p' && argv[1] === '/agents') {
 // A run.
 fs.readFileSync(0, 'utf8')
 const cwd = process.cwd()
-out({ event: 'init', init: { model: opt('--model'), cwd, tools: [], permission_mode: 'bypass' } })
+out({ event: 'init', init: { model: opt('--model'), cwd, agent: env.FAKE_INIT_AGENT || opt('--agent'), tools: [], permission_mode: 'bypass' } })
 const handlers = event => Object.values(config).flatMap(spec => (spec[event] ?? []).flatMap(h => h.hooks ?? [h]))
 const callHook = (h, input, timeoutMs) => {
   const timeout = timeoutMs ?? (Number(env.FAKE_HOOK_TIMEOUT_S) || h.timeout || 30) * 1000
@@ -124,7 +126,8 @@ if (opt('--agent') === 'delegate-verifier') {
 }
 if (env.FAKE_DELAY_START) sleep(env.FAKE_DELAY_START)
 if (env.FAKE_FORGE) fs.writeFileSync(path.join(env.AGY_DELEGATE_JOB, 'loaded'), '{"agent":"delegate-implementer"}\n')
-if (useHooks) for (const h of handlers('PreInvocation')) callHook(h, { ...common, invocationNum: 0 })
+const named = env.FAKE_INVOCATION_AGENT ? { agentName: env.FAKE_INVOCATION_AGENT } : {}
+if (useHooks) for (const h of handlers('PreInvocation')) callHook(h, { ...common, ...named, invocationNum: 0 })
 if (env.FAKE_TAMPER) {
   const file = path.join(env.AGY_DELEGATE_JOB, 'state.json')
   fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), paths: ['**'] }))
