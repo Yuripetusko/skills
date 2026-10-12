@@ -565,6 +565,16 @@ async function run(opts) {
     else updateMeta(dir, { verdict: msg })
     die(EXIT.setup, msg)
   }
+  // The baseline, the write lock and the verifier's diff go by the checkout `jobs.mjs new` recorded.
+  // A job created from another directory would scope them to the wrong checkout.
+  const recorded = tryJson(path.join(dir, 'meta.json'))?.toplevel
+  if (recorded) {
+    const top = spawnSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8' })
+    const here = top.status === 0 ? top.stdout.trim() : cwd
+    const real = p => (fs.existsSync(p) ? fs.realpathSync(p) : p)
+    if (real(recorded) !== real(here))
+      setupFailed(`the job was created in ${recorded}, but the runner runs in ${here}; create it with \`jobs.mjs new\` in this checkout`)
+  }
   // The verifier runs in implement jobs with a gate, after each clean gate check.
   const verifierModel = process.env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL
   if (mode === 'implement' && !opts.readOnly && !models.includes(verifierModel))

@@ -119,7 +119,8 @@ every Bash call with `cd "<cwd>" &&`. The job and agy run in that checkout.
 
 ## 1. Job directory and brief
 
-Create the job with `node "$JOBS" new agy --label "<mode>: <a few words of the task>"`. It prints the
+Create the job with `node "$JOBS" new agy --label "<mode>: <a few words of the task>"`, in the
+checkout the job runs in: the runner exits 18 for a job created in another one. It prints the
 directory; carry the literal path forward. Save the brief exactly as you received it to
 `<dir>/brief.md` with a quoted heredoc. Add nothing: the runner puts agy's preamble in front of it.
 
@@ -233,7 +234,7 @@ needs flagging. Never summarise, judge or correct agy's answer in it.
 | 15   | denied  | agy was refused a permission it cannot get headless                            |
 | 16   | busy    | Another write job is running in this checkout; `node "$JOBS" jobs` shows it    |
 | 17   | gate    | The gate or the verifier still found problems after 3 rounds, or the verifier could not give a verdict for a reason other than quota. The Gates section in `report.md` lists them |
-| 18   | setup   | The job rules or the gate baseline did not load, so nothing was enforced. Report it; don't retry until it is fixed |
+| 18   | setup   | The job rules or the gate baseline did not load, or the job was created in another checkout, so nothing was enforced. Report it; don't retry until it is fixed |
 | 128+ | signal  | Cancelled or killed                                                            |
 
 ## Messages from the delegating agent
