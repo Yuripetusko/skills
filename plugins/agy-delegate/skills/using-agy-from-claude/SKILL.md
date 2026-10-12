@@ -222,6 +222,10 @@ needs flagging. Never summarise, judge or correct agy's answer in it.
   `agy implement failed the gate (exit 17) · <job> · <model> · <gate verdict> · <scope verdict>`,
   then `wt-finish`'s output, then `out.md` verbatim (agy's answer is complete, not partial), then
   `report.md`.
+- **Exit 10 from the verifier.** When the first line under `## Gates` reads
+  `verifier no verdict, quota`, agy finished and only the verifier hit a quota or rate limit. Handle
+  it as exit 17, with `agy implement got no verifier verdict (exit 10: quota)` as the header's start.
+  The 429 is in `<dir>/verifier/stderr-<n>.log`.
 - **Any other non-zero exit.** Reply with `agy <mode> failed (exit <code>: <label>) · <job>`, then
   `report.md`, then the last 15 lines of `<dir>/agy-stderr.log`. If `out.md` has text, include it,
   labelled partial. Give no substitute answer, and skip `wt-finish`.
