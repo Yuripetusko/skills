@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { cleanLine } from '../jobs.mjs'
 
 export const STATE = 'state.json'
 export const HOOK_LOG = 'hook.log'
@@ -137,7 +138,7 @@ export function progress(dir, text) {
     try {
       offset = fs.statSync(path.join(dir, 'events.jsonl')).size
     } catch {}
-    const line = { at: new Date().toISOString(), run: process.env.AGY_DELEGATE_RUN, offset, text: String(text).replace(/\s+/g, ' ').trim().slice(0, 240) }
+    const line = { at: new Date().toISOString(), run: process.env.AGY_DELEGATE_RUN, offset, text: cleanLine(text) }
     fs.appendFileSync(path.join(dir, PROGRESS), `${JSON.stringify(line)}\n`)
   } catch {}
 }

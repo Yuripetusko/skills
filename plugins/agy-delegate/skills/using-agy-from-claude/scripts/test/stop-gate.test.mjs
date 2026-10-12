@@ -9,7 +9,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { stateHash, writeState } from '../hooks/job.mjs'
+import { progress, stateHash, writeState } from '../hooks/job.mjs'
 import { runVerifier, writeVerifierConfig } from '../hooks/verifier.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -637,6 +637,45 @@ test('tail places a gate line by the byte size of events.jsonl, also after non-A
     fs.writeFileSync(path.join(job, 'progress.jsonl'), `${marks.map(([offset, text]) => JSON.stringify({ offset, text })).join('\n')}\nnot json\n`)
     const lines = spawnSync(process.execPath, [JOBS, 'tail', job, '-n', '50'], { env: { ...process.env, DELEGATE_JOBS_DIR: dir }, encoding: 'utf8' }).stdout.split('\n').filter(Boolean)
     assert.deepEqual(lines.slice(1), ['before all', 'agy started: m in /w', 'says: héllo wörld ✓ ünïcode', 'after the answer', 'view_file  a.ts', 'after the tool', 'past the end'])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// Text from outside the hooks (a command's output, agy's stderr) can carry terminal control sequences.
+const BIDI = String.fromCharCode(0x202e)
+const DIRTY = `ok \x1b[31mred\x1b[0m \x1b]0;title\x07done\r\nnext\x00\x08\x9b${BIDI} end \x1b(B\x1b7\x1b[2J`
+const CONTROL_CHARS = new RegExp(`[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f${BIDI}]`)
+
+test('progress() drops escape sequences and control characters before it writes a line', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'progress-clean-'))
+  try {
+    progress(dir, DIRTY)
+    progress(dir, `${'x'.repeat(300)}\x1b[31m`)
+    const [first, second] = fs.readFileSync(path.join(dir, 'progress.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+    assert.equal(first.text, 'ok red done next end')
+    assert.equal(second.text, 'x'.repeat(240))
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('tail drops escape sequences and control characters from a progress line written by anything else', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tail-clean-'))
+  try {
+    const job = path.join(dir, 'agy-x')
+    fs.mkdirSync(job)
+    fs.writeFileSync(path.join(job, 'meta.json'), JSON.stringify({ id: 'agy-x', status: 'completed', cwd: '/w' }))
+    fs.writeFileSync(path.join(job, 'events.jsonl'), `${JSON.stringify({ event: 'init', init: { model: 'm', cwd: '/w' } })}\n`)
+    fs.writeFileSync(path.join(job, 'progress.jsonl'), `${JSON.stringify({ offset: 0, text: DIRTY })}\n`)
+    const out = spawnSync(process.execPath, [JOBS, 'tail', job, '-n', '50'], { env: { ...process.env, DELEGATE_JOBS_DIR: dir }, encoding: 'utf8' }).stdout
+    assert.equal(out.split('\n').filter(Boolean)[1], 'ok red done next end')
+    assert.doesNotMatch(out, CONTROL_CHARS)
+    // `jobs` shows the latest line of a job under its id.
+    fs.writeFileSync(path.join(job, 'progress.jsonl'), `${JSON.stringify({ offset: 1e9, text: DIRTY })}\n`)
+    const listed = spawnSync(process.execPath, [JOBS, 'jobs', '--all'], { env: { ...process.env, DELEGATE_JOBS_DIR: dir }, encoding: 'utf8' }).stdout
+    assert.match(listed, /ok red done next end/)
+    assert.doesNotMatch(listed, CONTROL_CHARS)
   } finally {
     fs.rmSync(dir, { recursive: true, force: true })
   }

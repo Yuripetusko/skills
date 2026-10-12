@@ -97,7 +97,7 @@ export function updateMeta(dir, patch) {
     fs.renameSync(tmp, file)
     return next
   } finally {
-    if (lock) fs.rmSync(lock.dir, { recursive: true, force: true })
+    releaseLock(lock)
   }
 }
 function allJobs() {
@@ -165,10 +165,11 @@ function cmdNew(args) {
 // Removing a stale lock on an old read deletes a live one: the owner may have released and exited, and
 // another process may have taken the name since (two holders, or a taker whose owner.json write fails).
 // So the verdict must be about one lock. Each owner.json carries a token. The owner is found dead, then
-// the file is read again, and the lock is stale only if the token is still the same: it belongs to a dead
-// owner, which nobody releases. Stale locks are removed only under a second lock, `<name>.takeover`, so
-// takers don't race each other either. A taker that dies inside the few ms of the takeover leaves a
-// guard that anyone may remove after 10 s.
+// the file is read again, and the lock is stale only if it is unchanged: it belongs to a dead owner,
+// which nobody releases. Stale locks are removed only under a second lock, `<name>.takeover`, so takers
+// don't race each other either. Every removal goes through removeIf, which moves the directory away,
+// checks whose it is and puts it back when it is not, so a lock that replaced the one a paused process
+// meant to remove is not deleted. A guard older than 10 s is reaped the same way.
 export function lockState(dir, afterRead = () => {}) {
   const file = path.join(dir, 'owner.json')
   const held = readJson(file)
@@ -179,14 +180,62 @@ export function lockState(dir, afterRead = () => {}) {
   } catch {
     return { gone: true }
   }
-  if (!held) return young ? { busy: 'another process' } : { stale: true }
+  if (!held) return young ? { busy: 'another process' } : { stale: true, owner: null }
   if (alive(held.pid)) return { busy: held.owner }
-  return JSON.stringify(readJson(file)) === JSON.stringify(held) ? { stale: true } : { changed: true }
+  return JSON.stringify(readJson(file)) === JSON.stringify(held) ? { stale: true, owner: held } : { changed: true }
 }
-export function takeLock(name, owner) {
+
+const sameOwner = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+// Removes the directory only while its owner.json is still `expected` (null: it has none) and, with
+// `minAgeMs`, only when it is that old. It is renamed away first and a wrong one is put back.
+// `between` is a test seam, called after the first check and before the move.
+export function removeIf(dir, expected, minAgeMs = 0, between = () => {}) {
+  if (!sameOwner(readJson(path.join(dir, 'owner.json')), expected)) return false
+  between()
+  const away = `${dir}.gone-${process.pid}-${Math.random().toString(36).slice(2)}`
+  try {
+    fs.renameSync(dir, away)
+  } catch (e) {
+    if (e.code === 'ENOENT') return false
+    throw e
+  }
+  let ours = sameOwner(readJson(path.join(away, 'owner.json')), expected)
+  try {
+    // Only when asked: a directory made this millisecond has an mtime a fraction ahead of Date.now().
+    if (minAgeMs) ours &&= Date.now() - fs.statSync(away).mtimeMs >= minAgeMs
+  } catch {
+    ours = false
+  }
+  if (ours) {
+    fs.rmSync(away, { recursive: true, force: true })
+    return true
+  }
+  try {
+    fs.renameSync(away, dir)
+  } catch {} // the name was taken in the meantime: leave the directory aside rather than delete it
+  return false
+}
+// Takes the lock `name` for `owner`, or returns {busy: <who>}. Release it with releaseLock. `beforeMove`
+// is a test seam, called under the guard right before a stale lock is moved away.
+export function takeLock(name, owner, { beforeMove = () => {} } = {}) {
   const dir = path.join(ROOT, '.locks', name)
   const guard = `${dir}.takeover`
   fs.mkdirSync(path.dirname(dir), { recursive: true })
+  const enter = who => {
+    try {
+      fs.mkdirSync(guard)
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+      return false
+    }
+    try {
+      fs.writeFileSync(path.join(guard, 'owner.json'), JSON.stringify(who))
+    } catch (e) {
+      fs.rmSync(guard, { recursive: true, force: true })
+      throw e
+    }
+    return true
+  }
   for (let attempt = 0; attempt < 500; attempt++) {
     let made = false
     try {
@@ -196,44 +245,42 @@ export function takeLock(name, owner) {
       if (e.code !== 'EEXIST') throw e
     }
     if (made) {
+      const mine = { owner, pid: process.pid, token: randomUUID() }
       try {
-        fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ owner, pid: process.pid, token: randomUUID() }))
+        fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify(mine))
       } catch (e) {
         fs.rmSync(dir, { recursive: true, force: true })
         throw e
       }
-      return { dir }
+      return { dir, owner: mine }
     }
     const state = lockState(dir)
     if (state.busy) return state
     if (state.gone || state.changed) continue // released, or replaced, since the failed mkdir: look again
-    try {
-      fs.mkdirSync(guard)
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e
+    const who = { pid: process.pid, token: randomUUID() }
+    if (!enter(who)) {
+      // A taker holds the guard for a few ms. One that died or stalled inside it is reaped after 10 s.
       try {
-        if (Date.now() - fs.statSync(guard).mtimeMs > 10_000) fs.rmSync(guard, { recursive: true, force: true })
+        if (Date.now() - fs.statSync(guard).mtimeMs > 10_000) removeIf(guard, readJson(path.join(guard, 'owner.json')), 10_000)
       } catch {}
       sleepMs(1 + Math.random() * 4)
       continue
     }
     try {
-      if (lockState(dir).stale) {
-        // A rename frees the name at once; the old contents are deleted afterwards.
-        const old = `${dir}.stale-${process.pid}-${Math.random().toString(36).slice(2)}`
-        try {
-          fs.renameSync(dir, old)
-          fs.rmSync(old, { recursive: true, force: true })
-        } catch (e) {
-          if (e.code !== 'ENOENT') throw e
-        }
+      const verdict = lockState(dir)
+      if (verdict.stale) {
+        beforeMove()
+        // A guard reaped while this process was paused is no longer ours: leave the lock alone then.
+        if (sameOwner(readJson(path.join(guard, 'owner.json')), who)) removeIf(dir, verdict.owner, verdict.owner ? 0 : 60_000)
       }
     } finally {
-      fs.rmSync(guard, { recursive: true, force: true })
+      removeIf(guard, who)
     }
   }
   return { busy: 'another process' }
 }
+// Releases a lock from takeLock, and only while owner.json still carries this process's token.
+export const releaseLock = lock => lock?.dir && removeIf(lock.dir, lock.owner)
 // One write job per checkout.
 const takeWriteLock = job =>
   takeLock(createHash('sha256').update(job.toplevel).digest('hex').slice(0, 16), job.id)
@@ -290,7 +337,7 @@ function cmdExec(args) {
     // reported as SUCCESS.
     const verdict = readJson(path.join(job.dir, 'meta.json'))?.verdict ?? (exitCode ? progressLines(job).at(-1) : null)
     end(status, exitCode, verdict ? { verdict } : {})
-    if (lock) fs.rmSync(lock.dir, { recursive: true, force: true })
+    releaseLock(lock)
     console.log(`${job.id} ${status} (exit ${exitCode}${verdict ? `: ${verdict}` : ''})`)
     console.log(`Answer: ${job.dir}/out.md · log: ${job.dir}/err.log`)
     process.exit(exitCode)
@@ -325,6 +372,15 @@ function cmdJobs(args) {
   console.log(`\nProgress: node ${home(path.join(ROOT, 'jobs.mjs'))} tail <job>   Stop: … cancel <job>`)
 }
 
+// A progress line can carry text from outside the hooks: a command's first output line, agy's stderr, an
+// error message. It reaches terminals and an orchestrator's Monitor stream, so escape sequences (CSI,
+// OSC and the other two-character ones) and control characters, including the C1 range, line and
+// paragraph separators and the bidi and zero-width marks, are dropped, then runs of white space shrink.
+const ESCAPES = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[ -/]*[0-~])/g
+const CONTROLS = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u206f\ufeff]/g
+export const cleanLine = (text, max = 240) =>
+  String(text).replace(ESCAPES, ' ').replace(CONTROLS, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
+
 // agy's stream has no hook events, so the gate's hooks write progress.jsonl themselves: one line when a
 // gate check or a verifier run starts and ends. `offset` is the size of events.jsonl when the line was
 // written, so the line goes after the events that end at or before it and the list only grows at the end.
@@ -338,7 +394,7 @@ function readHookProgress(dir) {
   return text.split('\n').flatMap(raw => {
     try {
       const e = JSON.parse(raw)
-      return typeof e.text === 'string' ? [{ offset: Number(e.offset) || 0, text: e.text.replace(/\s+/g, ' ').trim().slice(0, 240) }] : []
+      return typeof e.text === 'string' ? [{ offset: Number(e.offset) || 0, text: cleanLine(e.text) }] : []
     } catch {
       return []
     }
@@ -532,7 +588,7 @@ function cmdWtSetup(args) {
     }
     console.log(`$ ${run[0]} ${run[1].join(' ')}`)
     const r = spawnSync(run[0], run[1], { cwd: top, stdio: ['ignore', 'inherit', 'inherit'] })
-    if (lock?.dir) fs.rmSync(lock.dir, { recursive: true, force: true })
+    releaseLock(lock)
     if (r.status !== 0) fail(`${run[0]} ${run[1].join(' ')} exited ${r.status}`)
   }
   console.log(`ready: ${top} · branch ${gitOut(['branch', '--show-current']) || '(detached)'} · HEAD ${gitOut(['rev-parse', '--short', 'HEAD'])}`)
