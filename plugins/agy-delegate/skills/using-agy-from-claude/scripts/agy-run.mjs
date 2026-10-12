@@ -23,10 +23,12 @@ const EXIT = { ok: 0, usage: 1, failed: 2, empty: 3, quota: 10, auth: 11, timeou
 // The job's main agent. AGY_DELEGATE_AGENT overrides the --agent name only, for testing the setup checks.
 const AGENT = 'delegate-implementer'
 // Names from agy 1.3.3's init event. Left out: subagent, browser, MCP, image and permission tools.
+// Also left out: sed_file, command_status and send_command_input. The init event lists them, but an
+// agent naming them fails with "tool ... not found in registry" before its first step.
 const AGENT_TOOLS = [
   'view_file', 'list_dir', 'find_by_name', 'grep_search',
-  'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'sed_file',
-  'run_command', 'command_status', 'send_command_input', 'manage_task', 'schedule', 'wait',
+  'write_to_file', 'replace_file_content', 'multi_replace_file_content',
+  'run_command', 'manage_task', 'schedule', 'wait',
   'search_web', 'read_url_content',
 ]
 const LABEL = Object.fromEntries(Object.entries(EXIT).map(([k, v]) => [v, k]))
