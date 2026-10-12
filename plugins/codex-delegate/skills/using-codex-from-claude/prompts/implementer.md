@@ -14,7 +14,7 @@ Rules for this job:
   rules, no `any` casts or ts-ignore comments to silence errors.
 - Do not change behaviour to satisfy a type or lint rule.
 - Keep explicit `unknown` return types.
-- A `SAFETY:` comment must name the check that makes the cast safe. If none exists, keep the narrower type or leave the finding.
+- A `SAFETY:` comment must name the check, or the producing function's guarantee, that makes the cast safe. If neither exists, keep the narrower type or leave the finding.
 - Extract a shared helper instead of copying one.
 - Before editing files in a package, read that package's `AGENTS.md` (root rules load on their own, package rules don't).
 - Never edit ticket files, MAP.md or SPEC.md. The orchestrator owns status.

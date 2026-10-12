@@ -22,7 +22,8 @@
 //                   structured output), invalid, hang, crash (exit 1, no result), write and mcp (a
 //                   write call or an MCP write the hook should block, then PASS), scribble (edits
 //                   the worktree, then PASS), pass-exit1 and pass-kill (a PASS result, then exit 1 or
-//                   SIGKILL). Like a model that saw nothing, it answers FAIL when its hook denies
+//                   SIGKILL), quota (agy 1.3.3's 429: an error on stderr, a result with status ERROR,
+//                   exit 3). Like a model that saw nothing, it answers FAIL when its hook denies
 //                   the read of diff-numbered.txt or the file is missing.
 // FAKE_VERIFIER_LOG file that gets one JSON line per verifier run: round, cwd, args and env
 // FAKE_INIT_AGENT   the agent the init event names, as when agy falls back to another agent
@@ -113,6 +114,12 @@ if (opt('--agent') === 'delegate-verifier') {
   if (answer === 'scribble') fs.writeFileSync(path.join(cwd, 'verifier-was-here.txt'), 'x')
   if (answer === 'hang') sleep(3600)
   if (answer === 'crash') process.exit(1)
+  if (answer === 'quota') {
+    const error = 'Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 12m3s.'
+    process.stderr.write(`error: ${error}\nAGY_ERROR: ${JSON.stringify({ short_error: `RESOURCE_EXHAUSTED (code 429): ${error}`, status: 'RESOURCE_EXHAUSTED', error_code: 429, retryable: true })}\n`)
+    out({ event: 'result', result: { status: 'ERROR', response: '', error, duration_seconds: 1, conversation_id: 'fake-verifier' } })
+    process.exit(3)
+  }
   const finding = { file: 'pkg/src/b.ts', line: 1, rule: 'SAFETY comments are true', why: 'Nothing checks the value before the cast.', fix: 'Narrow it with a type guard first.' }
   const unread = { file: 'diff-numbered.txt', line: 0, rule: 'input', why: 'The input could not be read.', fix: 'Let the verifier read its input.' }
   const structured = !read

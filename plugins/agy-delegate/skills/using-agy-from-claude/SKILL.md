@@ -73,12 +73,17 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   `grep_search` on the worktree, its input dir and its config dir, plus `finish`; MCP and every other
   tool are denied. A FAIL goes back to agy like gate findings and shares the 3 rounds. A run that
   gives no valid verdict (timeout, a non-zero exit or a kill even after a streamed result, an invalid
-  result, a changed worktree) fails the round, and the job exits 17 without sending agy back. Without
+  result, a changed worktree) fails the round, and the job exits 17 without sending agy back, or 10
+  when agy reported a quota or rate limit. Without
   the job's environment its hook denies every call, `finish` included. Its inputs are in
   `<dir>/verifier/input-<n>/`, its verdict in `<dir>/verifier/result-<n>.json`, and its hook
   decisions in `hook.log` with `role: verifier`. It checks conventions, not a full review: the
   caller still reviews the change. It took 62 to 118 s on small diffs, 264 s once live, and 56 to
-  351 s on a 25-file diff. Its `--print-timeout` is 420 s.
+  351 s on a 25-file diff. In a Stop hook it gets what the hook's 1080 s leave after the gate check,
+  less 30 s for the last snapshot and the verdict, 5 s of SIGKILL grace and a 30 s kill margin: a
+  `--print-timeout` of 891 s after a 124 s check, 386 s after a 569 s check and 60 s of snapshots.
+  With under 60 s left it doesn't run, and the round has no verdict. The runner's own check gives
+  it what is left of 1020 s from the round's start the same way.
 - agy also stops mid-job, for example at a `wait` step while its own commands run. When the Stop
   input says `fullyIdle: false`, the hook runs no check and spends no round.
 - Each check records the git tree it checked. After agy exits, the runner takes a verdict only from
@@ -93,8 +98,7 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   verifier's model, and the findings still open. `meta.json` keeps the verdict, the rounds and the
   verifier's verdict in `gate`.
 - Without a config the report says `GATE: not configured`, and nothing is checked.
-- agy's `--print-timeout` gets 72 extra minutes for gate rounds (4 Stop hooks at 1080 s: a 570 s
-  check, a 450 s verifier run and 60 s for the diff). It is capped so the runner ends within 110
+- agy's `--print-timeout` gets 72 extra minutes for gate rounds (4 Stop hooks at 1080 s each). It is capped so the runner ends within 110
   minutes of its start, its own check and verifier run after agy exits included, and so the runner's
   kill timer allows at least one whole Stop hook run past `--print-timeout`. The cap applies to every
   job with a gate, at about 73 minutes. Whether hook time counts against `--print-timeout` is not
@@ -118,7 +122,8 @@ every Bash call with `cd "<cwd>" &&`. The job and agy run in that checkout.
 
 ## 1. Job directory and brief
 
-Create the job with `node "$JOBS" new agy --label "<mode>: <a few words of the task>"`. It prints the
+Create the job with `node "$JOBS" new agy --label "<mode>: <a few words of the task>"`, in the
+checkout the job runs in: the runner exits 18 for a job created in another one. It prints the
 directory; carry the literal path forward. Save the brief exactly as you received it to
 `<dir>/brief.md` with a quoted heredoc. Add nothing: the runner puts agy's preamble in front of it.
 
@@ -144,9 +149,11 @@ them in the saved brief, where agy sees `paths:` too.
   silenced one type error with `@ts-expect-error`. pro-high used 84% more tokens and about 10 more
   minutes. Pass whatever the brief names; the runner checks it against `agy models` (exit 14 lists
   the valid ones).
-- **Effort.** The model id carries it. agy's `--effort` works only with a bare family id such as
-  `gemini-3.8-flash`, which `agy models` doesn't list. With a suffixed id agy exits with "conflicts",
-  and flash rejects `xhigh` and `max`. The runner has no effort option.
+- **Effort.** The model id carries it. On agy 1.3.3, `gemini-3.8-flash-medium --effort high` exited
+  with "conflicts". The bare family id `gemini-3.8-flash` took `--effort high`, but `agy models`
+  doesn't list it, so the runner rejects it. Asked for `xhigh` on that id, agy listed `low`, `medium`
+  and `high`. A suffix with its matching effort, and `max`, were not tried. The runner has no effort
+  option.
 - **Timeout.** Default `30m`, capped at `110m`, so agy stops before the 2 h Bash limit.
 
 ## 3. Implement mode: prepare the worktree
@@ -216,6 +223,10 @@ needs flagging. Never summarise, judge or correct agy's answer in it.
   `agy implement failed the gate (exit 17) · <job> · <model> · <gate verdict> · <scope verdict>`,
   then `wt-finish`'s output, then `out.md` verbatim (agy's answer is complete, not partial), then
   `report.md`.
+- **Exit 10 from the verifier.** When the first line under `## Gates` reads
+  `verifier no verdict, quota`, agy finished and only the verifier hit a quota or rate limit. Handle
+  it as exit 17, with `agy implement got no verifier verdict (exit 10: quota)` as the header's start.
+  The 429 is in `<dir>/verifier/stderr-<n>.log`.
 - **Any other non-zero exit.** Reply with `agy <mode> failed (exit <code>: <label>) · <job>`, then
   `report.md`, then the last 15 lines of `<dir>/agy-stderr.log`. If `out.md` has text, include it,
   labelled partial. Give no substitute answer, and skip `wt-finish`.
@@ -224,15 +235,15 @@ needs flagging. Never summarise, judge or correct agy's answer in it.
 | ---- | ------- | ------------------------------------------------------------------------------ |
 | 2    | failed  | agy or model error, or agy bound to another directory than yours               |
 | 3    | empty   | agy reported success with no answer                                            |
-| 10   | quota   | Quota or rate limit. Another model, or later; a follow-up can resume the conversation |
+| 10   | quota   | Quota or rate limit, for agy or its verifier. Another model, or later; a follow-up can resume the conversation |
 | 11   | auth    | agy is not signed in. The user runs `agy` once in a terminal                   |
 | 12   | timeout | The turn limit expired; any answer is partial and can be resumed               |
 | 13   | missing | agy is not installed                                                           |
 | 14   | model   | Model not available; the error lists the valid ones                            |
 | 15   | denied  | agy was refused a permission it cannot get headless                            |
 | 16   | busy    | Another write job is running in this checkout; `node "$JOBS" jobs` shows it    |
-| 17   | gate    | The gate or the verifier still found problems after 3 rounds, or could not give a verdict. The Gates section in `report.md` lists them |
-| 18   | setup   | The job rules or the gate baseline did not load, so nothing was enforced. Report it; don't retry until it is fixed |
+| 17   | gate    | The gate or the verifier still found problems after 3 rounds, or the verifier could not give a verdict for a reason other than quota. The Gates section in `report.md` lists them |
+| 18   | setup   | The job rules or the gate baseline did not load, or the job was created in another checkout, so nothing was enforced. Report it; don't retry until it is fixed |
 | 128+ | signal  | Cancelled or killed                                                            |
 
 ## Messages from the delegating agent

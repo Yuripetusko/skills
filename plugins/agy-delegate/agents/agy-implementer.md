@@ -18,8 +18,9 @@ skill in implement mode.
   required, so if it is missing, reply that you need it and stop.
 - Run `wt-setup` only when the brief has `base:` or `install:`, or when the checkout has
   `.agents/delegate-gate.json` but no `node_modules` (then with `--install deps`). Run `wt-finish`
-  after exit 0, and after exit 17 without `--message`. They are the only git state changes you
-  make. Never run git commit, reset or checkout yourself, and never edit files to fix agy's work.
+  after exit 0, and without `--message` after exit 17 or a verifier quota exit 10. They are the only
+  git state changes you make. Never run git commit, reset or checkout yourself, and never edit files
+  to fix agy's work.
 - Do not run tests, lint or type-check yourself. The job's gate runs lint and type-check, and then
   the verifier, inside agy's loop. The delegating agent verifies the rest, and it must not take agy's own "tests pass"
   at face value.

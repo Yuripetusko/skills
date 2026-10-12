@@ -10,11 +10,15 @@
 
 import path from 'node:path'
 import { snapshotTree } from '../gate.mjs'
-import { isVerifier, jobDir, logLine, progress, readState, readStdin, ROUND_CAP, stateHash, writeState } from './job.mjs'
+import { HOOK_RESERVE_S, isVerifier, jobDir, logLine, progress, readState, readStdin, ROUND_CAP, stateHash, STOP_TIMEOUT_S, writeState } from './job.mjs'
 import { checkRound, coveredTree, VERIFIER_MODEL, verifierSummary } from './verifier.mjs'
 
 // agy stops on any decision other than "continue".
 const STOP = JSON.stringify({ decision: 'stop' })
+// agy kills this hook STOP_TIMEOUT_S after it starts. The verifier must be gone HOOK_RESERVE_S before,
+// so the last snapshot and the verdict still get written.
+const hookStart = Date.now()
+const verifierDeadlineAt = hookStart + (STOP_TIMEOUT_S - HOOK_RESERVE_S) * 1000
 
 const continueReason = (lines, attempt) =>
   [
@@ -29,7 +33,7 @@ const verifierReason = (lines, attempt) =>
   [
     `An independent check of your change found problems. Fix them before you finish. This is round ${attempt} of ${ROUND_CAP}, and after round ${ROUND_CAP} the job fails with them listed.`,
     ...lines,
-    'Fix the cause in the code. A cast, a disable comment or a new SAFETY: comment does not fix a finding.',
+    'Fix the cause in the code without changing what it does at runtime. A disable comment, a ts-ignore, or a cast whose SAFETY: comment the code does not back fixes nothing.',
     'If a finding is wrong, leave that code as it is and say why in your report.',
     'Then end with your report as before.',
   ].join('\n')
@@ -88,7 +92,7 @@ async function round(raw) {
   const tree = snapshotTree(state.worktree, path.join(dir, 'gate'))
   const env = process.env
   const verifier = { agy: env.AGY_DELEGATE_AGY, model: env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL, run, stateSha: env.AGY_DELEGATE_STATE_SHA }
-  const c = await checkRound({ dir, worktree: state.worktree, n, verifier, say })
+  const c = await checkRound({ dir, worktree: state.worktree, n, verifier, deadlineAt: verifierDeadlineAt, say })
   const fields = { tree: coveredTree(c, tree), ...c.fields, ...(c.verifier ? { verifier: verifierSummary(c.verifier) } : {}), ...(c.lines.length ? { lines: c.lines } : {}) }
   if (c.verdict === 'OK') {
     finish('OK', 'stop', fields, { reason: null })

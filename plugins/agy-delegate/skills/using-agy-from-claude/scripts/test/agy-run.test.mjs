@@ -113,6 +113,32 @@ test('an unknown --agent name exits 18 before launch', () => {
   assert.match(r.stderr, /agy -p \/agents` does not list agent "no-such-agent"/)
 })
 
+test('a job created in another checkout exits 18 before the baseline or agy starts', () => {
+  const ctx = setup()
+  const other = path.join(ctx.root, 'other')
+  fs.mkdirSync(other)
+  fs.writeFileSync(path.join(ctx.job, 'meta.json'), JSON.stringify({ id: 'agy-test', tool: 'agy', cwd: other, toplevel: other }))
+  for (const mode of ['implement', 'task']) {
+    const r = run(ctx, {}, ['--mode', mode])
+    assert.equal(r.status, 18, r.stderr)
+    assert.match(r.stderr, /the job was created in \S+\/other, but the runner runs in \S+\/repo; create it with `jobs\.mjs new` in this checkout/)
+  }
+  assert.ok(!fs.existsSync(path.join(ctx.job, 'events.jsonl')), 'agy started')
+  assert.ok(!fs.existsSync(path.join(ctx.job, 'gate')), 'the baseline ran')
+  assert.match(meta(ctx).verdict, /^the job was created in /)
+})
+
+test('a runner in a subdirectory of the checkout the job was created in passes the checkout check', () => {
+  const ctx = setup()
+  fs.writeFileSync(path.join(ctx.root, 'none.json'), '[]')
+  const r = spawnSync(process.execPath, [RUNNER, 'run', '--job-dir', ctx.job, '--mode', 'task', '--read-only', '--model', 'gemini-3.8-flash-low', '--timeout', '2m'], {
+    cwd: path.join(ctx.repo, 'src'),
+    encoding: 'utf8',
+    env: { ...process.env, AGY_BIN: FAKE, DELEGATE_JOBS_DIR: path.dirname(ctx.job), FAKE_CALLS_FILE: path.join(ctx.root, 'none.json') },
+  })
+  assert.equal(r.status, 0, r.stderr)
+})
+
 test('a run whose init event names another agent exits 18: agy fell back from delegate-implementer', () => {
   const ctx = setup()
   const r = run(ctx, { FAKE_INIT_AGENT: 'default' })

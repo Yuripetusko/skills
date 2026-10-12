@@ -9,7 +9,22 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { GATE_DEADLINE_S, progress, ROUND_CAP, runTimeouts, stateHash, STOP_TIMEOUT_S, VERIFIER_DEADLINE_S, writeState } from '../hooks/job.mjs'
+import {
+  GATE_DEADLINE_S,
+  HOOK_RESERVE_S,
+  progress,
+  ROUND_BUDGET_S,
+  ROUND_CAP,
+  runTimeouts,
+  stateHash,
+  STOP_TIMEOUT_S,
+  VERIFIER_DEADLINE_S,
+  VERIFIER_KILL_GRACE_S,
+  VERIFIER_KILL_MARGIN_S,
+  VERIFIER_MIN_PRINT_S,
+  verifierTimes,
+  writeState,
+} from '../hooks/job.mjs'
 import { runVerifier, writeVerifierConfig } from '../hooks/verifier.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -246,6 +261,28 @@ test('runTimeouts: the guard allows a whole Stop hook run past --print-timeout, 
   assert.deepEqual(runTimeouts({ timeoutS: 1800, gate: false, maxS, graceS }), { printS: 1800, guardS: 1920, capped: false })
 })
 
+test('verifierTimes: a Stop hook ends, verdict saved, before agy kills it at its timeout', () => {
+  // stop.mjs gives the verifier its timeout less HOOK_RESERVE_S, less what the check and snapshots took.
+  const hook = spentS => {
+    const { deadlineS, printS } = verifierTimes(STOP_TIMEOUT_S - HOOK_RESERVE_S - spentS)
+    // The kill timer, then SIGKILL's grace, then the last snapshot and the writes.
+    return { printS, endS: spentS + deadlineS + VERIFIER_KILL_GRACE_S + HOOK_RESERVE_S }
+  }
+  // The review's cases: a 124 s check, and a 569 s check with 10 s of inputs and 50 s of snapshots.
+  // Before, they ended at 1085 s and 1084 s.
+  for (const spentS of [0, 1.5, 124, 124 + 60, 569 + 10 + 50, GATE_DEADLINE_S + 5 + 60]) {
+    const { printS, endS } = hook(spentS)
+    assert.ok(endS <= STOP_TIMEOUT_S, `${spentS}s spent: the hook ends at ${endS}s`)
+    assert.ok(printS >= VERIFIER_MIN_PRINT_S, `${spentS}s spent: --print-timeout ${printS}s`)
+  }
+  assert.equal(hook(124).printS, 891)
+  assert.equal(hook(629).printS, 386)
+  // The runner's own check stays inside the round budget runTimeouts reserves after agy exits.
+  for (const spentS of [0, 124, GATE_DEADLINE_S + 5]) assert.ok(spentS + verifierTimes(ROUND_BUDGET_S - spentS).deadlineS + VERIFIER_KILL_GRACE_S <= ROUND_BUDGET_S)
+  assert.equal(ROUND_BUDGET_S, GATE_DEADLINE_S + VERIFIER_DEADLINE_S)
+  assert.equal(STOP_TIMEOUT_S, ROUND_BUDGET_S + 60)
+})
+
 test('a verifier run or a job without a gate leaves stop.mjs inert', () => {
   for (const env of [{ AGY_DELEGATE_ROLE: 'verifier', AGY_DELEGATE_GATE: '1' }, { AGY_DELEGATE_GATE: '' }]) {
     const r = spawnSync(process.execPath, [STOP], {
@@ -367,6 +404,8 @@ test('verifier FAIL goes back to agy with its findings, and a PASS in the next r
   assert.deepEqual(r.stops.map(a => a.decision), ['continue', 'stop'])
   assert.match(r.stops[0].reason, /^An independent check of your change found problems\. .*This is round 1 of 3/)
   assert.match(r.stops[0].reason, /\n- pkg\/src\/b\.ts:1 \[SAFETY comments are true\] Nothing checks the value before the cast\. Fix: Narrow it/)
+  // A SAFETY: comment backed by the code is a valid fix, and a throw added to fit a type is not.
+  assert.match(r.stops[0].reason, /\nFix the cause in the code without changing what it does at runtime\. .*a cast whose SAFETY: comment the code does not back/)
   assert.ok(r.stops[0].reason.split('\n').length <= 40)
   assert.match(r.report, /^## Gates\n- GATE OK: 0 added, 0 removed · verifier PASS · 2 round\(s\), 1 sent back\n/)
   assert.match(r.report, /- round 1: FAILED, 0 added, 0 removed, \d+s, verifier FAIL, 1 finding\(s\) in \d+s, sent back to agy\n {2}- pkg\/src\/b\.ts:1 \[SAFETY/)
@@ -378,13 +417,18 @@ test('verifier FAIL goes back to agy with its findings, and a PASS in the next r
   assert.equal(runs[0].cwd, ctx.repo)
   assert.equal(runs[0].role, 'verifier')
   const args = runs[0].args.join(' ')
+  const result = JSON.parse(fs.readFileSync(path.join(ctx.job, 'verifier', 'result-1.json'), 'utf8'))
   assert.match(args, new RegExp(`--add-dir ${path.join(ctx.job, 'agy-verifier')} --agent delegate-verifier --json-schema \\S+delegate-verifier\\.schema\\.json`))
-  assert.match(args, /--model gemini-3\.8-flash-medium .*--print-timeout 420s/)
+  // The fake gate check takes about a second. The Stop hook's own deadline bounds the verifier, which
+  // gets nearly all of it: more than the runner's round budget, less than the hook's timeout allows.
+  const printS = Number(/--model gemini-3\.8-flash-medium .*--print-timeout (\d+)s/.exec(args)?.[1])
+  const maxS = STOP_TIMEOUT_S - HOOK_RESERVE_S - VERIFIER_KILL_GRACE_S - VERIFIER_KILL_MARGIN_S
+  assert.ok(printS > ROUND_BUDGET_S - VERIFIER_KILL_MARGIN_S && printS <= maxS, args)
+  assert.equal(result.printS, printS)
   assert.ok(!runs[0].args.includes(path.join(ctx.job, 'agy')), 'the verifier must not load the implementer config')
   const input = path.join(ctx.job, 'verifier', 'input-1')
   assert.deepEqual(fs.readdirSync(input).sort(), ['brief.md', 'checklist.md', 'diff-numbered.txt', 'diff.patch', 'files.json', 'rules.json'])
   assert.match(fs.readFileSync(path.join(input, 'diff-numbered.txt'), 'utf8'), /pkg\/src\/b\.ts/)
-  const result = JSON.parse(fs.readFileSync(path.join(ctx.job, 'verifier', 'result-1.json'), 'utf8'))
   assert.equal(result.verdict, 'FAIL')
   assert.equal(result.findings[0].rule, 'SAFETY comments are true')
 })
@@ -418,6 +462,17 @@ for (const [answer, why] of [
     assert.match(r.report, why)
     assert.equal(r.meta.gate.verdict, 'FAILED')
     assert.equal(r.meta.gate.verifier.verdict, 'no verdict')
+  })
+}
+
+for (const [who, extra] of [['the Stop hook', {}], ["the runner's own check", { FAKE_STOP_HOOK: '0' }]]) {
+  test(`a verifier that hits a quota error in ${who} exits 10 (quota), not 17`, () => {
+    const ctx = changed()
+    const r = run(ctx, verified('0', 'quota', extra))
+    assert.equal(r.status, 10, r.report)
+    assert.match(r.report, /^## Gates\n- GATE FAILED: 0 added, 0 removed · verifier no verdict, quota · 1 round\(s\), 0 sent back\n/)
+    assert.match(r.report, /- exit 10 \(quota\): gate FAILED after 0 round\(s\) sent back: the verifier hit a quota or rate limit and produced no verdict \(the verifier exited 3 after streaming a result: AGY_ERROR: .*code 429/)
+    assert.equal(r.meta.gate.verdict, 'FAILED')
   })
 }
 
@@ -496,6 +551,25 @@ test('runVerifier leaves no file descriptors open for the verifier stdio', async
   const before = open()
   for (const n of [1, 2]) assert.equal((await runVerifier({ ...base, n })).verdict, 'PASS')
   assert.equal(open(), before)
+})
+
+test('runVerifier takes its kill timer and --print-timeout from its deadline, and skips agy when too little is left', async () => {
+  const { ctx, base } = verifierJob()
+  const log = path.join(ctx.root, 'verifier-runs.jsonl')
+  process.env.FAKE_VERIFIER_LOG = log
+  try {
+    const short = await runVerifier({ ...base, n: 1, deadlineAt: Date.now() + 50_000 })
+    assert.deepEqual([short.verdict, short.noVerdict], ['FAIL', true])
+    assert.match(short.reason, /^only (49|50)s were left for the verifier, too little for a 60s --print-timeout$/)
+    assert.ok(!fs.existsSync(log), 'agy ran with too little time')
+    const v = await runVerifier({ ...base, n: 2, deadlineAt: Date.now() + 200_000 })
+    assert.equal(v.verdict, 'PASS')
+    // 200 s less SIGKILL's 5 s grace and the 30 s kill margin.
+    assert.ok(v.printS >= 164 && v.printS <= 165, String(v.printS))
+    assert.match(JSON.parse(fs.readFileSync(log, 'utf8')).args.join(' '), new RegExp(`--print-timeout ${v.printS}s`))
+  } finally {
+    delete process.env.FAKE_VERIFIER_LOG
+  }
 })
 
 test('the verifier runs without AGY_DELEGATE_GATE', async () => {
@@ -612,7 +686,7 @@ test('tail shows each gate check and verifier run between agy steps, in order', 
     /^says: Fake agy round 2\.$/,
     gate(2, 'lint and type-check started'),
     gate(2, 'lint and type-check OK, 0 added, 0 removed \\(\\d+s\\)$'),
-    gate(2, 'verifier started: gemini-3\\.8-flash-medium, pid \\d+, stopped after 450s$'),
+    gate(2, 'verifier started: gemini-3\\.8-flash-medium, pid \\d+, stopped after \\d+s$'),
     gate(2, 'verifier PASS \\(\\d+s\\)$'),
     gate(2, 'OK, agy may stop$'),
     /^agy's turn ended: SUCCESS/,

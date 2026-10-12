@@ -38,7 +38,9 @@ End by calling `finish` with:
   - `line`: the `R` line number, or the `L` number for a removed line.
   - `rule`: the checklist item, or the `AGENTS.md` path and rule.
   - `why`: what is wrong, with the evidence you saw.
-  - `fix`: what to change.
+  - `fix`: what to change. The fix must keep what the code does at runtime, so never propose a new
+    throw, guard, default or early return to make a value fit a type. Where only a cast fits, name
+    the check or property its `SAFETY:` comment must cite, or say to keep the wider type.
 
 Report only problems you can point to in the diff. When unsure, read more code instead of guessing.
 Leave out praise, summaries and style opinions.

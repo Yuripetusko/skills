@@ -10,7 +10,16 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runDiff } from '../diff.mjs'
 import { snapshotTree } from '../gate.mjs'
-import { GATE_DEADLINE_S, readCheck, runGate, VERIFIER_DEADLINE_S, VERIFIER_PRINT_S } from './job.mjs'
+import {
+  GATE_DEADLINE_S,
+  isQuotaError,
+  readCheck,
+  ROUND_BUDGET_S,
+  runGate,
+  VERIFIER_KILL_GRACE_S,
+  VERIFIER_MIN_PRINT_S,
+  verifierTimes,
+} from './job.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const VERIFIER_AGENT = 'delegate-verifier'
@@ -102,8 +111,9 @@ const real = p => {
 
 // Runs the verifier for round `n` and writes $JOB/verifier/result-<n>.json. `run` and `stateSha` are the
 // execution's AGY_DELEGATE_RUN and AGY_DELEGATE_STATE_SHA, which its hook needs to allow any call; the
-// runner's own process doesn't have them in its environment. `ctl.stop` is set while the nested agy
-// runs, so a caller's signal handler can end it. `say(text)` reports the start (model, pid) for
+// runner's own process doesn't have them in its environment. `deadlineAt` (ms) is when the verifier must
+// be gone, SIGKILL included; its kill timer and --print-timeout come from it (verifierTimes). `ctl.stop`
+// is set while the nested agy runs, so a caller's signal handler can end it. `say(text)` reports the start (model, pid) for
 // `delegate-jobs tail`. Every outcome other than a valid PASS or FAIL from a
 // run that exited 0 is a FAIL with `noVerdict: true` and the reason, never a PASS.
 export async function runVerifier({
@@ -114,7 +124,7 @@ export async function runVerifier({
   model,
   run,
   stateSha,
-  deadlineS = Number(process.env.AGY_DELEGATE_VERIFIER_DEADLINE_S) || VERIFIER_DEADLINE_S,
+  deadlineAt = Date.now() + ROUND_BUDGET_S * 1000,
   ctl = {},
   say = () => {},
 }) {
@@ -140,6 +150,13 @@ export async function runVerifier({
   }
   if (!diff.totals.files) return save({ verdict: 'PASS', noVerdict: false, reason: 'the change is empty, so there was nothing to check', input, treeBefore })
   if (!agy) return save({ reason: 'no agy binary was passed to the verifier', input })
+  const leftS = Math.floor((deadlineAt - Date.now()) / 1000)
+  const times = verifierTimes(leftS)
+  const { printS } = times
+  if (printS < VERIFIER_MIN_PRINT_S)
+    return save({ reason: `only ${leftS}s were left for the verifier, too little for a ${VERIFIER_MIN_PRINT_S}s --print-timeout`, input, printS })
+  // AGY_DELEGATE_VERIFIER_DEADLINE_S sets the kill timer alone, for tests.
+  const deadlineS = Number(process.env.AGY_DELEGATE_VERIFIER_DEADLINE_S) || times.deadlineS
 
   const message = path.join(vdir, `input-${n}.jsonl`)
   fs.writeFileSync(message, `${JSON.stringify({ event: 'user', message: { role: 'user', content: briefFor(worktree, input, diff) } })}\n`)
@@ -147,7 +164,7 @@ export async function runVerifier({
   const stderr = path.join(vdir, `stderr-${n}.log`)
   const args = ['-p=', '--input-format', 'stream-json', '--output-format', 'stream-json', '--model', model]
   args.push('--add-dir', path.join(dir, 'agy-verifier'), '--agent', VERIFIER_AGENT, '--json-schema', SCHEMA)
-  args.push('--dangerously-skip-permissions', '--print-timeout', `${VERIFIER_PRINT_S}s`)
+  args.push('--dangerously-skip-permissions', '--print-timeout', `${printS}s`)
   let timedOut = false
   // The verifier is no gated job, so it doesn't get the implementer's AGY_DELEGATE_GATE.
   const { AGY_DELEGATE_GATE, ...inherited } = process.env
@@ -180,7 +197,7 @@ export async function runVerifier({
     }
     ctl.stop = () => {
       kill('SIGTERM')
-      setTimeout(() => kill('SIGKILL'), 5000).unref()
+      setTimeout(() => kill('SIGKILL'), VERIFIER_KILL_GRACE_S * 1000).unref()
     }
     const timer = setTimeout(() => ((timedOut = true), ctl.stop()), deadlineS * 1000)
     child.on('error', error => (clearTimeout(timer), resolve({ error: error.message })))
@@ -205,21 +222,26 @@ export async function runVerifier({
   const errText = fs.existsSync(stderr) ? fs.readFileSync(stderr, 'utf8') : ''
   const info = {
     input,
+    printS,
     treeBefore,
     treeAfter,
     conversationId: result?.conversation_id ?? null,
     usage: result?.usage ?? null,
     tools: parsed.filter(e => e.step_update?.step_type === 'tool' && e.step_update.state !== 'ACTIVE').length,
   }
-  const fail = reason => save({ ...info, reason })
-  if (timedOut) return save({ ...info, timedOut: true, reason: `the verifier ran past ${deadlineS}s and was stopped` })
+  // From agy's stderr and error only, so a run that hit a quota exits 10 rather than 17. Not for a run
+  // that changed the worktree or bound elsewhere: those fail as such.
+  const clean = treeAfter === treeBefore && !(init && real(init.cwd) !== real(worktree))
+  const quota = clean && isQuotaError(`${errText}\n${result?.error ?? ''}`) ? { quota: true } : {}
+  const fail = reason => save({ ...info, ...quota, reason })
+  if (timedOut) return save({ ...info, ...quota, timedOut: true, reason: `the verifier ran past ${deadlineS}s and was stopped` })
   if (outcome.error) return fail(`agy could not start: ${outcome.error}`)
   // A result streamed before a crash or a kill doesn't count.
   if (outcome.code !== 0 || outcome.signal)
     return fail(`the verifier exited ${outcome.signal ?? outcome.code} ${result ? 'after streaming a result' : 'without a result'}: ${errText.trim().split('\n').at(-1) || 'no detail'}`)
   if (treeAfter !== treeBefore) return fail('the worktree changed while the verifier ran')
   if (init && real(init.cwd) !== real(worktree)) return fail(`the verifier bound to ${init.cwd}, not the worktree`)
-  if (/print timeout after/i.test(errText)) return save({ ...info, timedOut: true, reason: `the verifier hit its --print-timeout of ${VERIFIER_PRINT_S}s` })
+  if (/print timeout after/i.test(errText)) return save({ ...info, ...quota, timedOut: true, reason: `the verifier hit its --print-timeout of ${printS}s` })
   if (!result) return fail(`the verifier ended without a result (exit ${outcome.code ?? outcome.signal}): ${errText.trim().split('\n').at(-1) || 'no detail'}`)
   if (result.status !== 'SUCCESS' || result.error) return fail(`the verifier run failed: ${result.error || result.status}`)
   const problem = invalidResult(result.structured_output)
@@ -250,6 +272,7 @@ export const verifierSummary = v => ({
   model: v.model,
   durationMs: v.durationMs,
   tools: v.tools ?? 0,
+  ...(v.quota ? { quota: true } : {}),
 })
 
 // The progress lines `delegate-jobs tail` shows for a gate check and a verifier run.
@@ -269,9 +292,11 @@ export function verifierLine(v) {
 
 // One round: the gate check, then the verifier when the gate is clean. Returns the round verdict
 // (OK only for a clean gate and a verifier PASS), the gate's fields, the lines to show, and the verifier
-// result. `ctl.stop` ends whichever child runs, for the caller's signal handler. `say(text)` writes the
-// round's progress lines for `delegate-jobs tail`: each start and each result.
-export async function checkRound({ dir, worktree, n, verifier, ctl = {}, say = () => {} }) {
+// result. `deadlineAt` (ms) is when the verifier must be gone: a Stop hook passes its own timeout less
+// HOOK_RESERVE_S, the runner ROUND_BUDGET_S from the round's start. `ctl.stop` ends whichever child
+// runs, for the caller's signal handler. `say(text)` writes the round's progress lines for
+// `delegate-jobs tail`: each start and each result.
+export async function checkRound({ dir, worktree, n, verifier, deadlineAt = Date.now() + ROUND_BUDGET_S * 1000, ctl = {}, say = () => {} }) {
   say(`lint and type-check started (stopped after ${GATE_DEADLINE_S}s)`)
   const gate = runGate(['check', '--job', dir, '--round', String(n)], { cwd: worktree, deadlineS: GATE_DEADLINE_S })
   ctl.stop = gate.stop
@@ -280,7 +305,7 @@ export async function checkRound({ dir, worktree, n, verifier, ctl = {}, say = (
   const c = readCheck(dir, n, r)
   say(gateLine(c))
   if (c.verdict !== 'OK') return { ...c, verifier: null }
-  const v = await runVerifier({ dir, worktree, n, ...verifier, ctl, say })
+  const v = await runVerifier({ dir, worktree, n, ...verifier, deadlineAt, ctl, say })
   say(verifierLine(v))
   const lines = findingLines(v)
   if (v.verdict === 'PASS') return { verdict: 'OK', fields: c.fields, lines: [], verifier: v }
