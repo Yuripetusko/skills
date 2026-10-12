@@ -16,6 +16,7 @@ Rules for this job:
 - Keep explicit `unknown` return types.
 - A `SAFETY:` comment must name the check that makes the cast safe. If none exists, keep the narrower type or leave the finding.
 - Extract a shared helper instead of copying one.
+- Before editing files in a package, read that package's `AGENTS.md` (root rules load on their own, package rules don't).
 - Never edit ticket files, MAP.md or SPEC.md. The orchestrator owns status.
 - Do not move unfixed findings into new tickets. List them as unfixed.
 - The calling agent runs the tests, lint and type-check after you. You may run them to check your
