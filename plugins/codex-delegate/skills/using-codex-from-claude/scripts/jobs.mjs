@@ -10,7 +10,7 @@
 // copies those modules next to ROOT/jobs.mjs.
 
 import { spawn, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -53,6 +53,7 @@ const alive = pid => {
     return e.code === 'EPERM'
   }
 }
+const sleepMs = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 const readJson = file => {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -81,7 +82,7 @@ function lockMeta(dir) {
   let lock
   while ((lock = takeLock(name, 'meta.json')).busy) {
     if (Date.now() > deadline) return null
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+    sleepMs(15 + Math.random() * 15)
   }
   return lock
 }
@@ -159,27 +160,76 @@ function cmdNew(args) {
   console.log(dir)
 }
 
-// mkdir is atomic, so two processes cannot both take a lock; a lock whose owner process is gone is
-// stale and gets replaced. A lock without owner.json is mid-acquire, unless that was over a minute ago.
-function takeLock(name, owner) {
+// mkdir is atomic, so two processes cannot both take a lock. A lock is stale when its owner process is
+// gone; one without owner.json is mid-acquire, unless that was over a minute ago.
+// Removing a stale lock on an old read deletes a live one: the owner may have released and exited, and
+// another process may have taken the name since (two holders, or a taker whose owner.json write fails).
+// So the verdict must be about one lock. Each owner.json carries a token. The owner is found dead, then
+// the file is read again, and the lock is stale only if the token is still the same: it belongs to a dead
+// owner, which nobody releases. Stale locks are removed only under a second lock, `<name>.takeover`, so
+// takers don't race each other either. A taker that dies inside the few ms of the takeover leaves a
+// guard that anyone may remove after 10 s.
+export function lockState(dir, afterRead = () => {}) {
+  const file = path.join(dir, 'owner.json')
+  const held = readJson(file)
+  afterRead() // lets a test change the lock between the read and the liveness check
+  let young
+  try {
+    young = Date.now() - fs.statSync(dir).mtimeMs < 60_000
+  } catch {
+    return { gone: true }
+  }
+  if (!held) return young ? { busy: 'another process' } : { stale: true }
+  if (alive(held.pid)) return { busy: held.owner }
+  return JSON.stringify(readJson(file)) === JSON.stringify(held) ? { stale: true } : { changed: true }
+}
+export function takeLock(name, owner) {
   const dir = path.join(ROOT, '.locks', name)
+  const guard = `${dir}.takeover`
   fs.mkdirSync(path.dirname(dir), { recursive: true })
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 500; attempt++) {
+    let made = false
     try {
       fs.mkdirSync(dir)
-      fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ owner, pid: process.pid }))
-      return { dir }
+      made = true
     } catch (e) {
       if (e.code !== 'EEXIST') throw e
-      const held = readJson(path.join(dir, 'owner.json'))
-      let young
+    }
+    if (made) {
       try {
-        young = Date.now() - fs.statSync(dir).mtimeMs < 60_000
-      } catch {
-        continue // released between the failed mkdir and the stat: take it
+        fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ owner, pid: process.pid, token: randomUUID() }))
+      } catch (e) {
+        fs.rmSync(dir, { recursive: true, force: true })
+        throw e
       }
-      if (held ? alive(held.pid) : young) return { busy: held?.owner ?? 'another process' }
-      fs.rmSync(dir, { recursive: true, force: true })
+      return { dir }
+    }
+    const state = lockState(dir)
+    if (state.busy) return state
+    if (state.gone || state.changed) continue // released, or replaced, since the failed mkdir: look again
+    try {
+      fs.mkdirSync(guard)
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+      try {
+        if (Date.now() - fs.statSync(guard).mtimeMs > 10_000) fs.rmSync(guard, { recursive: true, force: true })
+      } catch {}
+      sleepMs(1 + Math.random() * 4)
+      continue
+    }
+    try {
+      if (lockState(dir).stale) {
+        // A rename frees the name at once; the old contents are deleted afterwards.
+        const old = `${dir}.stale-${process.pid}-${Math.random().toString(36).slice(2)}`
+        try {
+          fs.renameSync(dir, old)
+          fs.rmSync(old, { recursive: true, force: true })
+        } catch (e) {
+          if (e.code !== 'ENOENT') throw e
+        }
+      }
+    } finally {
+      fs.rmSync(guard, { recursive: true, force: true })
     }
   }
   return { busy: 'another process' }
