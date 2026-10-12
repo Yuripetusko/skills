@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { cleanLine } from '../jobs.mjs'
 
 export const STATE = 'state.json'
 export const HOOK_LOG = 'hook.log'
@@ -125,6 +126,22 @@ export const logLine = (dir, entry) =>
     path.join(dir, HOOK_LOG),
     `${JSON.stringify({ at: new Date().toISOString(), run: process.env.AGY_DELEGATE_RUN, ...entry })}\n`,
   )
+
+// Progress lines for `delegate-jobs tail`. agy's stream carries no hook events, so a gate check or a
+// verifier run would look like a stalled job. `offset` is the size of events.jsonl now, which places the
+// line after the steps agy has already streamed. The file is display only: the runner never reads it
+// to decide anything, and a failed write is ignored so it can't break a hook.
+export const PROGRESS = 'progress.jsonl'
+export function progress(dir, text) {
+  try {
+    let offset = 0
+    try {
+      offset = fs.statSync(path.join(dir, 'events.jsonl')).size
+    } catch {}
+    const line = { at: new Date().toISOString(), run: process.env.AGY_DELEGATE_RUN, offset, text: cleanLine(text) }
+    fs.appendFileSync(path.join(dir, PROGRESS), `${JSON.stringify(line)}\n`)
+  } catch {}
+}
 
 export function readHookLog(dir) {
   const file = path.join(dir, HOOK_LOG)

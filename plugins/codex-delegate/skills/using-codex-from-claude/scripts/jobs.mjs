@@ -10,7 +10,7 @@
 // copies those modules next to ROOT/jobs.mjs.
 
 import { spawn, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -53,6 +53,7 @@ const alive = pid => {
     return e.code === 'EPERM'
   }
 }
+const sleepMs = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 const readJson = file => {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'))
@@ -81,7 +82,7 @@ function lockMeta(dir) {
   let lock
   while ((lock = takeLock(name, 'meta.json')).busy) {
     if (Date.now() > deadline) return null
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+    sleepMs(15 + Math.random() * 15)
   }
   return lock
 }
@@ -96,7 +97,7 @@ export function updateMeta(dir, patch) {
     fs.renameSync(tmp, file)
     return next
   } finally {
-    if (lock) fs.rmSync(lock.dir, { recursive: true, force: true })
+    releaseLock(lock)
   }
 }
 function allJobs() {
@@ -159,31 +160,127 @@ function cmdNew(args) {
   console.log(dir)
 }
 
-// mkdir is atomic, so two processes cannot both take a lock; a lock whose owner process is gone is
-// stale and gets replaced. A lock without owner.json is mid-acquire, unless that was over a minute ago.
-function takeLock(name, owner) {
+// mkdir is atomic, so two processes cannot both take a lock. A lock is stale when its owner process is
+// gone; one without owner.json is mid-acquire, unless that was over a minute ago.
+// Removing a stale lock on an old read deletes a live one: the owner may have released and exited, and
+// another process may have taken the name since (two holders, or a taker whose owner.json write fails).
+// So the verdict must be about one lock. Each owner.json carries a token. The owner is found dead, then
+// the file is read again, and the lock is stale only if it is unchanged: it belongs to a dead owner,
+// which nobody releases. Stale locks are removed only under a second lock, `<name>.takeover`, so takers
+// don't race each other either. Every removal goes through removeIf, which moves the directory away,
+// checks whose it is and puts it back when it is not, so a lock that replaced the one a paused process
+// meant to remove is not deleted. A guard older than 10 s is reaped the same way.
+export function lockState(dir, afterRead = () => {}) {
+  const file = path.join(dir, 'owner.json')
+  const held = readJson(file)
+  afterRead() // lets a test change the lock between the read and the liveness check
+  let young
+  try {
+    young = Date.now() - fs.statSync(dir).mtimeMs < 60_000
+  } catch {
+    return { gone: true }
+  }
+  if (!held) return young ? { busy: 'another process' } : { stale: true, owner: null }
+  if (alive(held.pid)) return { busy: held.owner }
+  return JSON.stringify(readJson(file)) === JSON.stringify(held) ? { stale: true, owner: held } : { changed: true }
+}
+
+const sameOwner = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+// Removes the directory only while its owner.json is still `expected` (null: it has none) and, with
+// `minAgeMs`, only when it is that old. It is renamed away first and a wrong one is put back.
+// `between` is a test seam, called after the first check and before the move.
+export function removeIf(dir, expected, minAgeMs = 0, between = () => {}) {
+  if (!sameOwner(readJson(path.join(dir, 'owner.json')), expected)) return false
+  between()
+  const away = `${dir}.gone-${process.pid}-${Math.random().toString(36).slice(2)}`
+  try {
+    fs.renameSync(dir, away)
+  } catch (e) {
+    if (e.code === 'ENOENT') return false
+    throw e
+  }
+  let ours = sameOwner(readJson(path.join(away, 'owner.json')), expected)
+  try {
+    // Only when asked: a directory made this millisecond has an mtime a fraction ahead of Date.now().
+    if (minAgeMs) ours &&= Date.now() - fs.statSync(away).mtimeMs >= minAgeMs
+  } catch {
+    ours = false
+  }
+  if (ours) {
+    fs.rmSync(away, { recursive: true, force: true })
+    return true
+  }
+  try {
+    fs.renameSync(away, dir)
+  } catch {} // the name was taken in the meantime: leave the directory aside rather than delete it
+  return false
+}
+// Takes the lock `name` for `owner`, or returns {busy: <who>}. Release it with releaseLock. `beforeMove`
+// is a test seam, called under the guard right before a stale lock is moved away.
+export function takeLock(name, owner, { beforeMove = () => {} } = {}) {
   const dir = path.join(ROOT, '.locks', name)
+  const guard = `${dir}.takeover`
   fs.mkdirSync(path.dirname(dir), { recursive: true })
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const enter = who => {
     try {
-      fs.mkdirSync(dir)
-      fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify({ owner, pid: process.pid }))
-      return { dir }
+      fs.mkdirSync(guard)
     } catch (e) {
       if (e.code !== 'EEXIST') throw e
-      const held = readJson(path.join(dir, 'owner.json'))
-      let young
+      return false
+    }
+    try {
+      fs.writeFileSync(path.join(guard, 'owner.json'), JSON.stringify(who))
+    } catch (e) {
+      fs.rmSync(guard, { recursive: true, force: true })
+      throw e
+    }
+    return true
+  }
+  for (let attempt = 0; attempt < 500; attempt++) {
+    let made = false
+    try {
+      fs.mkdirSync(dir)
+      made = true
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e
+    }
+    if (made) {
+      const mine = { owner, pid: process.pid, token: randomUUID() }
       try {
-        young = Date.now() - fs.statSync(dir).mtimeMs < 60_000
-      } catch {
-        continue // released between the failed mkdir and the stat: take it
+        fs.writeFileSync(path.join(dir, 'owner.json'), JSON.stringify(mine))
+      } catch (e) {
+        fs.rmSync(dir, { recursive: true, force: true })
+        throw e
       }
-      if (held ? alive(held.pid) : young) return { busy: held?.owner ?? 'another process' }
-      fs.rmSync(dir, { recursive: true, force: true })
+      return { dir, owner: mine }
+    }
+    const state = lockState(dir)
+    if (state.busy) return state
+    if (state.gone || state.changed) continue // released, or replaced, since the failed mkdir: look again
+    const who = { pid: process.pid, token: randomUUID() }
+    if (!enter(who)) {
+      // A taker holds the guard for a few ms. One that died or stalled inside it is reaped after 10 s.
+      try {
+        if (Date.now() - fs.statSync(guard).mtimeMs > 10_000) removeIf(guard, readJson(path.join(guard, 'owner.json')), 10_000)
+      } catch {}
+      sleepMs(1 + Math.random() * 4)
+      continue
+    }
+    try {
+      const verdict = lockState(dir)
+      if (verdict.stale) {
+        beforeMove()
+        // A guard reaped while this process was paused is no longer ours: leave the lock alone then.
+        if (sameOwner(readJson(path.join(guard, 'owner.json')), who)) removeIf(dir, verdict.owner, verdict.owner ? 0 : 60_000)
+      }
+    } finally {
+      removeIf(guard, who)
     }
   }
   return { busy: 'another process' }
 }
+// Releases a lock from takeLock, and only while owner.json still carries this process's token.
+export const releaseLock = lock => lock?.dir && removeIf(lock.dir, lock.owner)
 // One write job per checkout.
 const takeWriteLock = job =>
   takeLock(createHash('sha256').update(job.toplevel).digest('hex').slice(0, 16), job.id)
@@ -240,7 +337,7 @@ function cmdExec(args) {
     // reported as SUCCESS.
     const verdict = readJson(path.join(job.dir, 'meta.json'))?.verdict ?? (exitCode ? progressLines(job).at(-1) : null)
     end(status, exitCode, verdict ? { verdict } : {})
-    if (lock) fs.rmSync(lock.dir, { recursive: true, force: true })
+    releaseLock(lock)
     console.log(`${job.id} ${status} (exit ${exitCode}${verdict ? `: ${verdict}` : ''})`)
     console.log(`Answer: ${job.dir}/out.md · log: ${job.dir}/err.log`)
     process.exit(exitCode)
@@ -265,19 +362,64 @@ function cmdJobs(args) {
     const took = j.endedAt ? `took ${dur(start, j.endedAt)}` : `${j.status} for ${dur(start)}`
     const exit = j.exitCode != null ? ` exit ${j.exitCode}` : ''
     const scope = j.scope ? `  scope ${j.scope === 'ok' ? 'OK' : 'VIOLATION'}${j.commit ? ` · commit ${j.commit}` : ''}` : ''
-    const gate = j.gate?.verdict ? `  gate ${j.gate.verdict}` : ''
+    // meta.gate.verifier is set when an agy job with a gate ends.
+    const v = j.gate?.verifier
+    const verifier = v?.verdict ? ` · verifier ${v.verdict}${v.verdict === 'FAIL' ? ` (${v.findings ?? '?'})` : ''}` : ''
+    const gate = j.gate?.verdict ? `  gate ${j.gate.verdict}${verifier}` : ''
     console.log(`${j.id}  ${j.endedAt ? j.status + exit + '  ' : ''}${took}${scope}${gate}  ${j.label ?? ''}`.trimEnd())
     console.log(`    ${home(j.cwd)}${j.branch ? ` (${j.branch})` : ''}  ${lastLine(j) ?? ''}`.trimEnd())
   }
   console.log(`\nProgress: node ${home(path.join(ROOT, 'jobs.mjs'))} tail <job>   Stop: … cancel <job>`)
 }
 
-// agy writes stream-json events; render them as one line per tool call or finished answer.
-function renderAgyEvents(file, cwd, partial) {
+// A progress line can carry text from outside the hooks: a command's first output line, agy's stderr, an
+// error message. It reaches terminals and an orchestrator's Monitor stream, so escape sequences (CSI,
+// OSC and the other two-character ones) and control characters, including the C1 range, line and
+// paragraph separators and the bidi and zero-width marks, are dropped, then runs of white space shrink.
+const ESCAPES = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[ -/]*[0-~])/g
+const CONTROLS = /[\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060-\u206f\ufeff]/g
+export const cleanLine = (text, max = 240) =>
+  String(text).replace(ESCAPES, ' ').replace(CONTROLS, ' ').replace(/\s+/g, ' ').trim().slice(0, max)
+
+// agy's stream has no hook events, so the gate's hooks write progress.jsonl themselves: one line when a
+// gate check or a verifier run starts and ends. `offset` is the size of events.jsonl when the line was
+// written, so the line goes after the events that end at or before it and the list only grows at the end.
+function readHookProgress(dir) {
+  let text
+  try {
+    text = fs.readFileSync(path.join(dir, 'progress.jsonl'), 'utf8')
+  } catch {
+    return []
+  }
+  return text.split('\n').flatMap(raw => {
+    try {
+      const e = JSON.parse(raw)
+      return typeof e.text === 'string' ? [{ offset: Number(e.offset) || 0, text: cleanLine(e.text) }] : []
+    } catch {
+      return []
+    }
+  })
+}
+
+// agy writes stream-json events; render them as one line per tool call or finished answer, with the
+// gate's progress lines between them. Entries are {text, hook}, hook being true for a progress line.
+function renderAgyEvents(file, cwd, partial, hooks = []) {
   const lines = []
+  const add = (text, hook = false) => lines.push({ text, hook })
   let text = ''
+  let next = 0
   const seen = new Set()
-  for (const raw of fs.readFileSync(file, 'utf8').split('\n')) {
+  const flush = upTo => {
+    while (next < hooks.length && hooks[next].offset <= upTo) add(hooks[next++].text, true)
+  }
+  const buf = fs.readFileSync(file)
+  for (let pos = 0; pos < buf.length; ) {
+    // Byte positions, to match the size the hook recorded.
+    const nl = buf.indexOf(10, pos)
+    const end = nl < 0 ? buf.length : nl
+    const [raw, start] = [buf.toString('utf8', pos, end), pos]
+    pos = end + 1
+    flush(start)
     let e
     try {
       e = JSON.parse(raw)
@@ -285,36 +427,38 @@ function renderAgyEvents(file, cwd, partial) {
       continue
     }
     const s = e.step_update
-    if (e.event === 'init') lines.push(`agy started: ${e.init?.model} in ${home(e.init?.cwd)}`)
+    if (e.event === 'init') add(`agy started: ${e.init?.model} in ${home(e.init?.cwd)}`)
     if (e.event === 'result') {
       const r = e.result ?? {}
-      lines.push(`agy's turn ended: ${r.status} after ${Math.round(r.duration_seconds ?? 0)}s${r.error ? `: ${r.error.split('\n')[0]}` : ''}`)
+      add(`agy's turn ended: ${r.status} after ${Math.round(r.duration_seconds ?? 0)}s${r.error ? `: ${r.error.split('\n')[0]}` : ''}`)
     }
     if (!s) continue
     if (s.step_type === 'tool' && !seen.has(s.step_index)) {
       seen.add(s.step_index)
       const p = s.tool_info?.parameters ?? {}
       const target = p.TargetFile ?? p.AbsolutePath ?? p.CommandLine ?? p.Query ?? ''
-      lines.push(`${s.tool_name}  ${path.isAbsolute(target) ? path.relative(cwd, target) || '.' : target}`.trimEnd())
+      add(`${s.tool_name}  ${path.isAbsolute(target) ? path.relative(cwd, target) || '.' : target}`.trimEnd())
     }
     if (s.step_type === 'agent_response') {
       text += s.text_delta ?? ''
       if (s.state === 'DONE' && text.trim()) {
-        lines.push(`says: ${text.trim().replace(/\s+/g, ' ').slice(0, 160)}`)
+        add(`says: ${text.trim().replace(/\s+/g, ' ').slice(0, 160)}`)
         text = ''
       }
     }
   }
-  if (partial && text.trim()) lines.push(`writing: …${text.trim().replace(/\s+/g, ' ').slice(-160)}`)
+  flush(Infinity)
+  if (partial && text.trim()) add(`writing: …${text.trim().replace(/\s+/g, ' ').slice(-160)}`)
   return lines
 }
 // Streams (exec, tail -f) take only finished lines; snapshots also show the answer being written.
-function progressLines(job, { partial = false } = {}) {
+function progressEntries(job, { partial = false } = {}) {
   const events = path.join(job.dir, 'events.jsonl')
-  if (fs.existsSync(events)) return renderAgyEvents(events, job.cwd ?? process.cwd(), partial)
+  if (fs.existsSync(events)) return renderAgyEvents(events, job.cwd ?? process.cwd(), partial, readHookProgress(job.dir))
   const err = path.join(job.dir, 'err.log')
-  return fs.existsSync(err) ? fs.readFileSync(err, 'utf8').split('\n').filter(Boolean) : []
+  return (fs.existsSync(err) ? fs.readFileSync(err, 'utf8').split('\n').filter(Boolean) : []).map(text => ({ text, hook: false }))
 }
+const progressLines = (job, opts) => progressEntries(job, opts).map(e => e.text)
 function lastLine(job) {
   const line = progressLines(job, { partial: true }).at(-1)
   return line && line.length > 110 ? `${line.slice(0, 107)}...` : line
@@ -323,7 +467,8 @@ function lastLine(job) {
 // -f keeps following until the job ends and then prints its outcome, so `tail -f` works as an event
 // stream for Claude Code's Monitor tool. --next waits for the next job to start, for a caller that
 // has just dispatched a relay and does not know its job yet. --every <dur> condenses the stream to
-// one summary line per interval, so a watching agent spends little context on it.
+// one summary line per interval, so a watching agent spends little context on it; the gate's progress
+// lines (check and verifier start and result) still come through as they happen.
 function cmdTail(args) {
   const opt = name => (args.includes(name) ? args[args.indexOf(name) + 1] : null)
   const n = Number(opt('-n')) || 20
@@ -345,17 +490,23 @@ function follow(job, n, keep, everyMs) {
   const clip = l => (l.length > 140 ? `${l.slice(0, 137)}...` : l)
   console.log(`${job.id} · ${job.status} · ${home(job.cwd)} · ${home(job.dir)}`)
   if (!keep) return progressLines(job, { partial: true }).slice(-n).forEach(l => console.log(l))
-  let shown = progressLines(job)
-  if (!everyMs) shown.slice(-n).forEach(l => console.log(l))
+  let shown = progressEntries(job)
+  if (!everyMs) shown.slice(-n).forEach(e => console.log(e.text))
   let pending = 0
   let latest = null
   let lastEmit = Date.now()
   const timer = setInterval(() => {
-    const now = progressLines(job)
+    const now = progressEntries(job)
     const fresh = now.slice(shown.length)
     shown = now
-    if (!everyMs) fresh.forEach(l => console.log(l))
-    else if (fresh.length) [pending, latest] = [pending + fresh.length, fresh.at(-1)]
+    if (!everyMs) fresh.forEach(e => console.log(e.text))
+    else {
+      // The gate's lines are few and say what a stalled-looking job is doing, so they are never condensed.
+      for (const e of fresh) {
+        if (e.hook) console.log(`${job.id} · ${clip(e.text)}`)
+        else [pending, latest] = [pending + 1, e.text]
+      }
+    }
     if (everyMs && pending && Date.now() - lastEmit >= everyMs) {
       console.log(`${job.id} · +${pending} step(s) · ${clip(latest)}`)
       ;[pending, lastEmit] = [0, Date.now()]
@@ -437,7 +588,7 @@ function cmdWtSetup(args) {
     }
     console.log(`$ ${run[0]} ${run[1].join(' ')}`)
     const r = spawnSync(run[0], run[1], { cwd: top, stdio: ['ignore', 'inherit', 'inherit'] })
-    if (lock?.dir) fs.rmSync(lock.dir, { recursive: true, force: true })
+    releaseLock(lock)
     if (r.status !== 0) fail(`${run[0]} ${run[1].join(' ')} exited ${r.status}`)
   }
   console.log(`ready: ${top} · branch ${gitOut(['branch', '--show-current']) || '(detached)'} · HEAD ${gitOut(['rev-parse', '--short', 'HEAD'])}`)

@@ -76,7 +76,10 @@ node ~/.claude/delegate-jobs/jobs.mjs cancel <job>
 For the orchestrating session itself, start the Monitor tool on
 `delegate-jobs tail --next -f --every 2m` right after dispatching. It sends one summary line every two
 minutes and then the job's outcome, which keeps the orchestrator's context small. Drop `--every` to
-get every step.
+get every step. An agy job with a gate also prints a few lines per round as its Stop hook starts and
+finishes each lint and type-check run and verifier run, so a long check doesn't look like a stall. The
+lines give the findings added, the verifier's model and any timeout, and `--every` doesn't condense
+them. `jobs` shows the verifier verdict beside the gate verdict.
 
 `jobs.mjs`, `diff.mjs` and `gate.mjs` are shared by both plugins, with an identical copy in each; check them with
 `cmp plugins/agy-delegate/skills/using-agy-from-claude/scripts/jobs.mjs plugins/codex-delegate/skills/using-codex-from-claude/scripts/jobs.mjs`
