@@ -10,7 +10,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runDiff } from '../diff.mjs'
 import { snapshotTree } from '../gate.mjs'
-import { GATE_DEADLINE_S, readCheck, runGate, VERIFIER_DEADLINE_S, VERIFIER_PRINT_S } from './job.mjs'
+import { GATE_DEADLINE_S, isQuotaError, readCheck, runGate, VERIFIER_DEADLINE_S, VERIFIER_PRINT_S } from './job.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 export const VERIFIER_AGENT = 'delegate-verifier'
@@ -211,15 +211,19 @@ export async function runVerifier({
     usage: result?.usage ?? null,
     tools: parsed.filter(e => e.step_update?.step_type === 'tool' && e.step_update.state !== 'ACTIVE').length,
   }
-  const fail = reason => save({ ...info, reason })
-  if (timedOut) return save({ ...info, timedOut: true, reason: `the verifier ran past ${deadlineS}s and was stopped` })
+  // From agy's stderr and error only, so a run that hit a quota exits 10 rather than 17. Not for a run
+  // that changed the worktree or bound elsewhere: those fail as such.
+  const clean = treeAfter === treeBefore && !(init && real(init.cwd) !== real(worktree))
+  const quota = clean && isQuotaError(`${errText}\n${result?.error ?? ''}`) ? { quota: true } : {}
+  const fail = reason => save({ ...info, ...quota, reason })
+  if (timedOut) return save({ ...info, ...quota, timedOut: true, reason: `the verifier ran past ${deadlineS}s and was stopped` })
   if (outcome.error) return fail(`agy could not start: ${outcome.error}`)
   // A result streamed before a crash or a kill doesn't count.
   if (outcome.code !== 0 || outcome.signal)
     return fail(`the verifier exited ${outcome.signal ?? outcome.code} ${result ? 'after streaming a result' : 'without a result'}: ${errText.trim().split('\n').at(-1) || 'no detail'}`)
   if (treeAfter !== treeBefore) return fail('the worktree changed while the verifier ran')
   if (init && real(init.cwd) !== real(worktree)) return fail(`the verifier bound to ${init.cwd}, not the worktree`)
-  if (/print timeout after/i.test(errText)) return save({ ...info, timedOut: true, reason: `the verifier hit its --print-timeout of ${VERIFIER_PRINT_S}s` })
+  if (/print timeout after/i.test(errText)) return save({ ...info, ...quota, timedOut: true, reason: `the verifier hit its --print-timeout of ${VERIFIER_PRINT_S}s` })
   if (!result) return fail(`the verifier ended without a result (exit ${outcome.code ?? outcome.signal}): ${errText.trim().split('\n').at(-1) || 'no detail'}`)
   if (result.status !== 'SUCCESS' || result.error) return fail(`the verifier run failed: ${result.error || result.status}`)
   const problem = invalidResult(result.structured_output)
@@ -250,6 +254,7 @@ export const verifierSummary = v => ({
   model: v.model,
   durationMs: v.durationMs,
   tools: v.tools ?? 0,
+  ...(v.quota ? { quota: true } : {}),
 })
 
 // The progress lines `delegate-jobs tail` shows for a gate check and a verifier run.

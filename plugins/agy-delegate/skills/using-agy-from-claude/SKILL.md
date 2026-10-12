@@ -73,7 +73,8 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   `grep_search` on the worktree, its input dir and its config dir, plus `finish`; MCP and every other
   tool are denied. A FAIL goes back to agy like gate findings and shares the 3 rounds. A run that
   gives no valid verdict (timeout, a non-zero exit or a kill even after a streamed result, an invalid
-  result, a changed worktree) fails the round, and the job exits 17 without sending agy back. Without
+  result, a changed worktree) fails the round, and the job exits 17 without sending agy back, or 10
+  when agy reported a quota or rate limit. Without
   the job's environment its hook denies every call, `finish` included. Its inputs are in
   `<dir>/verifier/input-<n>/`, its verdict in `<dir>/verifier/result-<n>.json`, and its hook
   decisions in `hook.log` with `role: verifier`. It checks conventions, not a full review: the
@@ -224,14 +225,14 @@ needs flagging. Never summarise, judge or correct agy's answer in it.
 | ---- | ------- | ------------------------------------------------------------------------------ |
 | 2    | failed  | agy or model error, or agy bound to another directory than yours               |
 | 3    | empty   | agy reported success with no answer                                            |
-| 10   | quota   | Quota or rate limit. Another model, or later; a follow-up can resume the conversation |
+| 10   | quota   | Quota or rate limit, for agy or its verifier. Another model, or later; a follow-up can resume the conversation |
 | 11   | auth    | agy is not signed in. The user runs `agy` once in a terminal                   |
 | 12   | timeout | The turn limit expired; any answer is partial and can be resumed               |
 | 13   | missing | agy is not installed                                                           |
 | 14   | model   | Model not available; the error lists the valid ones                            |
 | 15   | denied  | agy was refused a permission it cannot get headless                            |
 | 16   | busy    | Another write job is running in this checkout; `node "$JOBS" jobs` shows it    |
-| 17   | gate    | The gate or the verifier still found problems after 3 rounds, or could not give a verdict. The Gates section in `report.md` lists them |
+| 17   | gate    | The gate or the verifier still found problems after 3 rounds, or the verifier could not give a verdict for a reason other than quota. The Gates section in `report.md` lists them |
 | 18   | setup   | The job rules or the gate baseline did not load, so nothing was enforced. Report it; don't retry until it is fixed |
 | 128+ | signal  | Cancelled or killed                                                            |
 

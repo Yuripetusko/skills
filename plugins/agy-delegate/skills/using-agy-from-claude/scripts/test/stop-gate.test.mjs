@@ -423,6 +423,17 @@ for (const [answer, why] of [
   })
 }
 
+for (const [who, extra] of [['the Stop hook', {}], ["the runner's own check", { FAKE_STOP_HOOK: '0' }]]) {
+  test(`a verifier that hits a quota error in ${who} exits 10 (quota), not 17`, () => {
+    const ctx = changed()
+    const r = run(ctx, verified('0', 'quota', extra))
+    assert.equal(r.status, 10, r.report)
+    assert.match(r.report, /^## Gates\n- GATE FAILED: 0 added, 0 removed · verifier no verdict, quota · 1 round\(s\), 0 sent back\n/)
+    assert.match(r.report, /- exit 10 \(quota\): gate FAILED after 0 round\(s\) sent back: the verifier hit a quota or rate limit and produced no verdict \(the verifier exited 3 after streaming a result: AGY_ERROR: .*code 429/)
+    assert.equal(r.meta.gate.verdict, 'FAILED')
+  })
+}
+
 test('the verifier hook blocks a write: hook.log shows no allowed write and the worktree is unchanged', () => {
   const ctx = changed()
   const r = run(ctx, verified('0', 'write'))

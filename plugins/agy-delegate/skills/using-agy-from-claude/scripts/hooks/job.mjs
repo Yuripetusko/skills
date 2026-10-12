@@ -82,6 +82,9 @@ export function runGate(args, { cwd, deadlineS }) {
   return { child, stop, done }
 }
 
+// agy's error text for a quota or rate limit, as in `RESOURCE_EXHAUSTED (code 429)`.
+export const isQuotaError = text => /quota|rate.?limit|resource.?exhausted|\b429\b/i.test(text)
+
 // The nested verifier run sets this; the implementer's hooks then stay out of its way.
 export const isVerifier = () => process.env.AGY_DELEGATE_ROLE === 'verifier'
 

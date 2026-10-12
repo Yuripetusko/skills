@@ -15,7 +15,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { snapshotTree } from './gate.mjs'
-import { CANARY, progress, readHookLog, readState, ROUND_CAP, runGate, runTimeouts, STOP_TIMEOUT_S, stateHash, writeState } from './hooks/job.mjs'
+import { CANARY, isQuotaError, progress, readHookLog, readState, ROUND_CAP, runGate, runTimeouts, STOP_TIMEOUT_S, stateHash, writeState } from './hooks/job.mjs'
 import { checkRound, coveredTree, VERIFIER_AGENT, VERIFIER_MODEL, verifierSummary, writeVerifierConfig } from './hooks/verifier.mjs'
 import { updateMeta } from './jobs.mjs'
 
@@ -285,7 +285,7 @@ function gitStatus(cwd) {
 
 function classifyError(text) {
   if (/sign in|authenticat|unauthorized|reauth/i.test(text)) return EXIT.auth
-  if (/quota|rate.?limit|resource.?exhausted|\b429\b/i.test(text)) return EXIT.quota
+  if (isQuotaError(text)) return EXIT.quota
   if (/not recognized as a known model|invalid model/i.test(text)) return EXIT.model
   if (/deadline exceeded|timed out/i.test(text)) return EXIT.timeout
   return EXIT.failed
@@ -437,7 +437,7 @@ function gateOutcome(dir, gate, runId, settled, verifierBlocked = 0) {
   const verifierText = (h, timed) => {
     const v = h?.verifier
     if (!v) return []
-    const what = v.noVerdict ? 'no verdict' : v.verdict === 'FAIL' ? `FAIL, ${v.findings} finding(s)` : 'PASS'
+    const what = v.noVerdict ? `no verdict${v.quota ? ', quota' : ''}` : v.verdict === 'FAIL' ? `FAIL, ${v.findings} finding(s)` : 'PASS'
     return [`verifier ${what}${timed ? ` in ${Math.round((v.durationMs ?? 0) / 1000)}s` : ''}`]
   }
   const rounds = `${g.round ?? 0} round(s), ${g.continues ?? 0} sent back`
@@ -465,9 +465,11 @@ function gateOutcome(dir, gate, runId, settled, verifierBlocked = 0) {
     ...(verifierBlocked ? [`- the verifier's hook blocked ${verifierBlocked} call(s); see hook.log`] : []),
     `- details: ${path.join(dir, 'gate')}/${history.some(h => h.verifier) ? ` and ${path.join(dir, 'verifier')}/` : ''}`,
   ]
+  // A verifier that hit a quota or rate limit says nothing about the change: the job exits 10, not 17.
+  const quota = verdict === 'FAILED' && Boolean(decided?.verifier?.noVerdict && decided.verifier.quota)
   const failedBy = decided?.verifier
     ? decided.verifier.noVerdict
-      ? `the verifier produced no verdict (${decided.verifier.reason})`
+      ? `the verifier ${quota ? 'hit a quota or rate limit and ' : ''}produced no verdict (${decided.verifier.reason})`
       : `the verifier found ${decided.verifier.findings} problem(s)`
     : `${decided?.added ?? '?'} finding(s) added${decided?.outside ? `, ${decided.outside} file(s) outside the baseline scope` : ''}`
   const why = verdict === 'FAILED' ? `gate FAILED after ${g.continues ?? 0} round(s) sent back: ${failedBy}` : `gate error: ${reason}`
@@ -481,7 +483,7 @@ function gateOutcome(dir, gate, runId, settled, verifierBlocked = 0) {
     rounds: g.round ?? 0,
     verifier: decided?.verifier ? { verdict: decided.verifier.noVerdict ? 'no verdict' : decided.verifier.verdict, findings: decided.verifier.findings, model: decided.verifier.model, durationMs: decided.verifier.durationMs } : null,
   }
-  return { verdict, head, lines, why, meta }
+  return { verdict, head, lines, why, meta, quota }
 }
 
 // meta.gate also holds what `gate check --job` writes each round. The runner sets the final verdict
@@ -764,7 +766,7 @@ async function run(opts) {
       }
       const verifierBlocked = readHookLog(dir).filter(e => e.run === runId && e.role === 'verifier' && e.decision === 'deny').length
       gates = gateOutcome(dir, gate, runId, settled, verifierBlocked)
-      if (exit === EXIT.ok && !['OK', 'not configured'].includes(gates.verdict)) [exit, why] = [EXIT.gate, gates.why]
+      if (exit === EXIT.ok && !['OK', 'not configured'].includes(gates.verdict)) [exit, why] = [gates.quota ? EXIT.quota : EXIT.gate, gates.why]
     }
 
     const answer = result?.response?.trim() ? result.response : said
