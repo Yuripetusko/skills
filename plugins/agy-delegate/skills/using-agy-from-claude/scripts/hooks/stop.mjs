@@ -10,7 +10,7 @@
 
 import path from 'node:path'
 import { snapshotTree } from '../gate.mjs'
-import { isVerifier, jobDir, logLine, readState, readStdin, ROUND_CAP, stateHash, writeState } from './job.mjs'
+import { isVerifier, jobDir, logLine, progress, readState, readStdin, ROUND_CAP, stateHash, writeState } from './job.mjs'
 import { checkRound, coveredTree, VERIFIER_MODEL, verifierSummary } from './verifier.mjs'
 
 // agy stops on any decision other than "continue".
@@ -55,14 +55,23 @@ async function round(raw) {
   if (input.fullyIdle === false) {
     save({ verdict: 'error', reason: 'agy stopped with work still running, and no check ran after that' })
     logLine(dir, { hook: 'Stop', decision: 'stop', skipped: 'not idle', terminationReason: input.terminationReason ?? null })
+    progress(dir, 'gate: agy stopped with work still running, so no check this time')
     return STOP
   }
   save({ round: n, verdict: 'error', reason: `the Stop hook did not finish round ${n}` })
   const entry = { run, round: n, executionNum: input.executionNum ?? null, terminationReason: input.terminationReason ?? null, fullyIdle: input.fullyIdle ?? null }
+  const say = text => progress(dir, `gate round ${n}: ${text}`)
   const finish = (verdict, action, fields, patch = {}) => {
     const h = { ...entry, verdict, action, ...fields }
     save({ verdict, history: [...(readState(dir).gate?.history ?? []), h], ...patch })
     logLine(dir, { hook: 'Stop', decision: action, round: n, verdict, exit: h.exit ?? null, added: h.added ?? null, verifier: h.verifier?.verdict ?? null })
+    say(
+      action === 'continue'
+        ? `sent back to agy (${patch.continues} of ${ROUND_CAP})`
+        : verdict === 'OK'
+          ? 'OK, agy may stop'
+          : `${verdict}, stop allowed${patch.reason ? `: ${patch.reason}` : ''}`,
+    )
   }
   if (stateHash(state) !== process.env.AGY_DELEGATE_STATE_SHA) {
     finish('error', 'stop', { lines: [] }, { reason: 'state.json changed during the run' })
@@ -79,7 +88,7 @@ async function round(raw) {
   const tree = snapshotTree(state.worktree, path.join(dir, 'gate'))
   const env = process.env
   const verifier = { agy: env.AGY_DELEGATE_AGY, model: env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL, run, stateSha: env.AGY_DELEGATE_STATE_SHA }
-  const c = await checkRound({ dir, worktree: state.worktree, n, verifier })
+  const c = await checkRound({ dir, worktree: state.worktree, n, verifier, say })
   const fields = { tree: coveredTree(c, tree), ...c.fields, ...(c.verifier ? { verifier: verifierSummary(c.verifier) } : {}), ...(c.lines.length ? { lines: c.lines } : {}) }
   if (c.verdict === 'OK') {
     finish('OK', 'stop', fields, { reason: null })
@@ -112,6 +121,7 @@ try {
   process.stderr.write(`stop: ${error.stack ?? error.message}\n`)
   try {
     logLine(jobDir(), { hook: 'Stop', decision: 'stop', verdict: 'error', error: error.message })
+    progress(jobDir(), `gate: the Stop hook crashed, stop allowed: ${error.message}`)
   } catch {}
 }
 console.log(answer)

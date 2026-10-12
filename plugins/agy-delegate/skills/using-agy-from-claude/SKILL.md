@@ -255,10 +255,32 @@ have progress pushed to it: right after dispatching a relay, start the Monitor t
 last line, and the latest one) and then the job's outcome. Drop `--every` to get every step, which
 costs the watching agent more context. Use `tail <job> -f` when the job is already known.
 
+A job with a gate also shows what its Stop hook is doing. agy's stream has no hook events, so a gate
+check of 2 to 6 minutes or a verifier run of 1 to 7 minutes would look like a stalled job. The hooks
+write `progress.jsonl` and `tail` puts its lines between agy's steps. They cover each gate check and
+verifier run at its start and its end, with the findings added and removed, the verifier's model and
+pid, any timeout, and what the hook decided. A round is up to five lines, and none come from the
+verifier's own tool calls:
+
+```
+gate round 1: lint and type-check started (stopped after 570s)
+gate round 1: lint and type-check OK, 0 added, 0 removed (141s)
+gate round 1: verifier started: gemini-3.8-flash-medium, pid 4242, stopped after 450s
+gate round 1: verifier FAIL, 1 finding(s) (87s)
+gate round 1: sent back to agy (1 of 3)
+```
+
+With `--every` these lines still print as they happen, and only agy's own steps are condensed. When
+the runner checks the tree agy left after agy exits, its lines read `gate round 4 (runner, after agy
+exited): ...`. Once the job ends, `jobs` shows the verifier next to the gate, for example
+`gate OK · verifier PASS` or `gate FAILED · verifier FAIL (2)`. While it runs, `jobs` shows the
+latest line under the job. The file is for display only; the runner never reads it for a verdict.
+
 Jobs live in `~/.claude/delegate-jobs/<tool>-<date>-<time>-<rand>/` (override with
 `DELEGATE_JOBS_DIR`). Each holds `meta.json`, `brief.md`, `input.jsonl`, `events.jsonl` (agy's
 stream), `agy-stderr.log`, `out.md`, `err.log` and `report.md`. agy jobs also hold `agy/` (the job's
-agent and hooks), `state.json`, `hook.log` and `loaded`, the canary the hooks write when they start.
+agent and hooks), `state.json`, `hook.log`, `progress.jsonl` (the gate's progress lines) and `loaded`,
+the canary the hooks write when they start.
 Implement jobs with a gate also hold `gate/`: the baseline and each round's snapshot and delta,
 `agy-verifier/` (the verifier's agent and hook) and `verifier/` (each run's inputs, events and
 verdict).

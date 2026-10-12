@@ -315,19 +315,55 @@ function cmdJobs(args) {
     const took = j.endedAt ? `took ${dur(start, j.endedAt)}` : `${j.status} for ${dur(start)}`
     const exit = j.exitCode != null ? ` exit ${j.exitCode}` : ''
     const scope = j.scope ? `  scope ${j.scope === 'ok' ? 'OK' : 'VIOLATION'}${j.commit ? ` · commit ${j.commit}` : ''}` : ''
-    const gate = j.gate?.verdict ? `  gate ${j.gate.verdict}` : ''
+    // meta.gate.verifier is set when an agy job with a gate ends.
+    const v = j.gate?.verifier
+    const verifier = v?.verdict ? ` · verifier ${v.verdict}${v.verdict === 'FAIL' ? ` (${v.findings ?? '?'})` : ''}` : ''
+    const gate = j.gate?.verdict ? `  gate ${j.gate.verdict}${verifier}` : ''
     console.log(`${j.id}  ${j.endedAt ? j.status + exit + '  ' : ''}${took}${scope}${gate}  ${j.label ?? ''}`.trimEnd())
     console.log(`    ${home(j.cwd)}${j.branch ? ` (${j.branch})` : ''}  ${lastLine(j) ?? ''}`.trimEnd())
   }
   console.log(`\nProgress: node ${home(path.join(ROOT, 'jobs.mjs'))} tail <job>   Stop: … cancel <job>`)
 }
 
-// agy writes stream-json events; render them as one line per tool call or finished answer.
-function renderAgyEvents(file, cwd, partial) {
+// agy's stream has no hook events, so the gate's hooks write progress.jsonl themselves: one line when a
+// gate check or a verifier run starts and ends. `offset` is the size of events.jsonl when the line was
+// written, so the line goes after the events that end at or before it and the list only grows at the end.
+function readHookProgress(dir) {
+  let text
+  try {
+    text = fs.readFileSync(path.join(dir, 'progress.jsonl'), 'utf8')
+  } catch {
+    return []
+  }
+  return text.split('\n').flatMap(raw => {
+    try {
+      const e = JSON.parse(raw)
+      return typeof e.text === 'string' ? [{ offset: Number(e.offset) || 0, text: e.text.replace(/\s+/g, ' ').trim().slice(0, 240) }] : []
+    } catch {
+      return []
+    }
+  })
+}
+
+// agy writes stream-json events; render them as one line per tool call or finished answer, with the
+// gate's progress lines between them. Entries are {text, hook}, hook being true for a progress line.
+function renderAgyEvents(file, cwd, partial, hooks = []) {
   const lines = []
+  const add = (text, hook = false) => lines.push({ text, hook })
   let text = ''
+  let next = 0
   const seen = new Set()
-  for (const raw of fs.readFileSync(file, 'utf8').split('\n')) {
+  const flush = upTo => {
+    while (next < hooks.length && hooks[next].offset <= upTo) add(hooks[next++].text, true)
+  }
+  const buf = fs.readFileSync(file)
+  for (let pos = 0; pos < buf.length; ) {
+    // Byte positions, to match the size the hook recorded.
+    const nl = buf.indexOf(10, pos)
+    const end = nl < 0 ? buf.length : nl
+    const [raw, start] = [buf.toString('utf8', pos, end), pos]
+    pos = end + 1
+    flush(start)
     let e
     try {
       e = JSON.parse(raw)
@@ -335,36 +371,38 @@ function renderAgyEvents(file, cwd, partial) {
       continue
     }
     const s = e.step_update
-    if (e.event === 'init') lines.push(`agy started: ${e.init?.model} in ${home(e.init?.cwd)}`)
+    if (e.event === 'init') add(`agy started: ${e.init?.model} in ${home(e.init?.cwd)}`)
     if (e.event === 'result') {
       const r = e.result ?? {}
-      lines.push(`agy's turn ended: ${r.status} after ${Math.round(r.duration_seconds ?? 0)}s${r.error ? `: ${r.error.split('\n')[0]}` : ''}`)
+      add(`agy's turn ended: ${r.status} after ${Math.round(r.duration_seconds ?? 0)}s${r.error ? `: ${r.error.split('\n')[0]}` : ''}`)
     }
     if (!s) continue
     if (s.step_type === 'tool' && !seen.has(s.step_index)) {
       seen.add(s.step_index)
       const p = s.tool_info?.parameters ?? {}
       const target = p.TargetFile ?? p.AbsolutePath ?? p.CommandLine ?? p.Query ?? ''
-      lines.push(`${s.tool_name}  ${path.isAbsolute(target) ? path.relative(cwd, target) || '.' : target}`.trimEnd())
+      add(`${s.tool_name}  ${path.isAbsolute(target) ? path.relative(cwd, target) || '.' : target}`.trimEnd())
     }
     if (s.step_type === 'agent_response') {
       text += s.text_delta ?? ''
       if (s.state === 'DONE' && text.trim()) {
-        lines.push(`says: ${text.trim().replace(/\s+/g, ' ').slice(0, 160)}`)
+        add(`says: ${text.trim().replace(/\s+/g, ' ').slice(0, 160)}`)
         text = ''
       }
     }
   }
-  if (partial && text.trim()) lines.push(`writing: …${text.trim().replace(/\s+/g, ' ').slice(-160)}`)
+  flush(Infinity)
+  if (partial && text.trim()) add(`writing: …${text.trim().replace(/\s+/g, ' ').slice(-160)}`)
   return lines
 }
 // Streams (exec, tail -f) take only finished lines; snapshots also show the answer being written.
-function progressLines(job, { partial = false } = {}) {
+function progressEntries(job, { partial = false } = {}) {
   const events = path.join(job.dir, 'events.jsonl')
-  if (fs.existsSync(events)) return renderAgyEvents(events, job.cwd ?? process.cwd(), partial)
+  if (fs.existsSync(events)) return renderAgyEvents(events, job.cwd ?? process.cwd(), partial, readHookProgress(job.dir))
   const err = path.join(job.dir, 'err.log')
-  return fs.existsSync(err) ? fs.readFileSync(err, 'utf8').split('\n').filter(Boolean) : []
+  return (fs.existsSync(err) ? fs.readFileSync(err, 'utf8').split('\n').filter(Boolean) : []).map(text => ({ text, hook: false }))
 }
+const progressLines = (job, opts) => progressEntries(job, opts).map(e => e.text)
 function lastLine(job) {
   const line = progressLines(job, { partial: true }).at(-1)
   return line && line.length > 110 ? `${line.slice(0, 107)}...` : line
@@ -373,7 +411,8 @@ function lastLine(job) {
 // -f keeps following until the job ends and then prints its outcome, so `tail -f` works as an event
 // stream for Claude Code's Monitor tool. --next waits for the next job to start, for a caller that
 // has just dispatched a relay and does not know its job yet. --every <dur> condenses the stream to
-// one summary line per interval, so a watching agent spends little context on it.
+// one summary line per interval, so a watching agent spends little context on it; the gate's progress
+// lines (check and verifier start and result) still come through as they happen.
 function cmdTail(args) {
   const opt = name => (args.includes(name) ? args[args.indexOf(name) + 1] : null)
   const n = Number(opt('-n')) || 20
@@ -395,17 +434,23 @@ function follow(job, n, keep, everyMs) {
   const clip = l => (l.length > 140 ? `${l.slice(0, 137)}...` : l)
   console.log(`${job.id} · ${job.status} · ${home(job.cwd)} · ${home(job.dir)}`)
   if (!keep) return progressLines(job, { partial: true }).slice(-n).forEach(l => console.log(l))
-  let shown = progressLines(job)
-  if (!everyMs) shown.slice(-n).forEach(l => console.log(l))
+  let shown = progressEntries(job)
+  if (!everyMs) shown.slice(-n).forEach(e => console.log(e.text))
   let pending = 0
   let latest = null
   let lastEmit = Date.now()
   const timer = setInterval(() => {
-    const now = progressLines(job)
+    const now = progressEntries(job)
     const fresh = now.slice(shown.length)
     shown = now
-    if (!everyMs) fresh.forEach(l => console.log(l))
-    else if (fresh.length) [pending, latest] = [pending + fresh.length, fresh.at(-1)]
+    if (!everyMs) fresh.forEach(e => console.log(e.text))
+    else {
+      // The gate's lines are few and say what a stalled-looking job is doing, so they are never condensed.
+      for (const e of fresh) {
+        if (e.hook) console.log(`${job.id} · ${clip(e.text)}`)
+        else [pending, latest] = [pending + 1, e.text]
+      }
+    }
     if (everyMs && pending && Date.now() - lastEmit >= everyMs) {
       console.log(`${job.id} · +${pending} step(s) · ${clip(latest)}`)
       ;[pending, lastEmit] = [0, Date.now()]

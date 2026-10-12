@@ -15,7 +15,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { snapshotTree } from './gate.mjs'
-import { CANARY, GATE_DEADLINE_S, readHookLog, readState, ROUND_CAP, runGate, STOP_TIMEOUT_S, stateHash, VERIFIER_DEADLINE_S, writeState } from './hooks/job.mjs'
+import { CANARY, GATE_DEADLINE_S, progress, readHookLog, readState, ROUND_CAP, runGate, STOP_TIMEOUT_S, stateHash, VERIFIER_DEADLINE_S, writeState } from './hooks/job.mjs'
 import { checkRound, coveredTree, VERIFIER_AGENT, VERIFIER_MODEL, verifierSummary, writeVerifierConfig } from './hooks/verifier.mjs'
 import { updateMeta } from './jobs.mjs'
 
@@ -404,8 +404,12 @@ async function settleGate(dir, worktree, runId, mayCheck, verifier) {
   const ctl = {}
   const cancel = () => ctl.stop?.()
   for (const sig of Object.keys(SIGNALS)) process.on(sig, cancel)
-  const c = await checkRound({ dir, worktree, n, verifier, ctl })
+  // The same progress lines as a Stop hook's round, for `delegate-jobs tail`.
+  const say = text => progress(dir, `gate round ${n} (runner, after agy exited): ${text}`)
+  say('no check covers the tree agy left, so the runner checks it')
+  const c = await checkRound({ dir, worktree, n, verifier, ctl, say })
   for (const sig of Object.keys(SIGNALS)) process.off(sig, cancel)
+  say(c.verdict === 'OK' ? 'OK' : `${c.verdict}${c.reason ? `: ${c.reason}` : ''}`)
   const v = c.verifier ? { verifier: verifierSummary(c.verifier) } : {}
   const entry = { run: runId, round: n, verdict: c.verdict, action: 'runner', tree: coveredTree(c, tree), ...c.fields, ...v, ...(c.lines.length ? { lines: c.lines } : {}) }
   const reason = c.verdict === 'OK' ? null : c.verdict === 'FAILED' ? (c.reason ?? 'the change adds findings') : c.reason

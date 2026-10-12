@@ -3,7 +3,7 @@
 // Run: node --test 'scripts/test/*.test.mjs'
 
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -48,24 +48,19 @@ function setup({ calls = [], rounds = [] } = {}) {
   return ctx
 }
 
+const runnerEnv = (ctx, env = {}) => ({
+  ...process.env,
+  AGY_BIN: FAKE_AGY,
+  DELEGATE_JOBS_DIR: path.dirname(ctx.job),
+  FAKE_CALLS_FILE: ctx.calls,
+  FAKE_ROUNDS_FILE: ctx.rounds,
+  FAKE_GATE_LOG: path.join(ctx.root, 'gate-calls.jsonl'),
+  ...env,
+})
+const runnerArgs = (ctx, mode = 'implement', args = []) => [RUNNER, 'run', '--job-dir', ctx.job, '--mode', mode, '--model', 'gemini-3.8-flash-low', '--timeout', '2m', ...args]
+
 function run(ctx, { mode = 'implement', args = [], env = {} } = {}) {
-  const r = spawnSync(
-    process.execPath,
-    [RUNNER, 'run', '--job-dir', ctx.job, '--mode', mode, '--model', 'gemini-3.8-flash-low', '--timeout', '2m', ...args],
-    {
-      cwd: ctx.repo,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        AGY_BIN: FAKE_AGY,
-        DELEGATE_JOBS_DIR: path.dirname(ctx.job),
-        FAKE_CALLS_FILE: ctx.calls,
-        FAKE_ROUNDS_FILE: ctx.rounds,
-        FAKE_GATE_LOG: path.join(ctx.root, 'gate-calls.jsonl'),
-        ...env,
-      },
-    },
-  )
+  const r = spawnSync(process.execPath, runnerArgs(ctx, mode, args), { cwd: ctx.repo, encoding: 'utf8', env: runnerEnv(ctx, env) })
   const read = name => (fs.existsSync(path.join(ctx.job, name)) ? fs.readFileSync(path.join(ctx.job, name), 'utf8') : '')
   const events = read('events.jsonl').split('\n').filter(Boolean).map(l => JSON.parse(l))
   return {
@@ -510,4 +505,188 @@ test('the generated verifier config: read-only agent with finish, a PreToolUse h
   const hooks = JSON.parse(fs.readFileSync(path.join(cfg, 'hooks.json'), 'utf8'))
   assert.deepEqual(Object.keys(hooks['agy-delegate-verifier']), ['PreToolUse'])
   assert.match(hooks['agy-delegate-verifier'].PreToolUse[0].hooks[0].command, /pre-tool\.mjs'$/)
+})
+
+// `delegate-jobs tail`: agy's stream has no hook events, so the hooks write progress.jsonl and tail puts
+// those lines between agy's own steps.
+const JOBS = path.join(HERE, '..', 'jobs.mjs')
+const tailEnv = ctx => ({ ...process.env, DELEGATE_JOBS_DIR: path.dirname(ctx.job) })
+const snapshot = ctx => spawnSync(process.execPath, [JOBS, 'tail', ctx.job, '-n', '200'], { env: tailEnv(ctx), encoding: 'utf8' }).stdout.split('\n').filter(Boolean)
+function assertInOrder(lines, patterns) {
+  let at = 0
+  for (const p of patterns) {
+    const i = lines.findIndex((l, idx) => idx >= at && p.test(l))
+    assert.ok(i >= 0, `no line matching ${p} after line ${at} in:\n${lines.join('\n')}`)
+    at = i + 1
+  }
+}
+const gate = (n, text, prefix = '') => new RegExp(`^${prefix}gate round ${n}: ${text}`)
+
+// Runs the job through `jobs.mjs exec` while `jobs.mjs tail <tailArgs>` follows it. `--next` waits for a
+// job created after it starts, so the job's meta.json is written afterwards.
+async function watched(ctx, tailArgs, env = {}) {
+  const meta = path.join(ctx.job, 'meta.json')
+  const arm = () => fs.writeFileSync(meta, JSON.stringify({ ...JSON.parse(fs.readFileSync(meta, 'utf8')), status: 'created', createdAt: new Date().toISOString() }))
+  const next = tailArgs.includes('--next')
+  if (!next) arm()
+  const finished = child => new Promise(resolve => child.on('exit', code => resolve(code)))
+  let stdout = ''
+  const tail = spawn(process.execPath, [JOBS, 'tail', ...(next ? [] : [ctx.job]), ...tailArgs], { env: tailEnv(ctx), stdio: ['ignore', 'pipe', 'inherit'] })
+  tail.stdout.setEncoding('utf8').on('data', d => (stdout += d))
+  const killer = setTimeout(() => tail.kill(), 60_000)
+  const tailed = finished(tail)
+  if (next) arm()
+  const exec = spawn(process.execPath, [JOBS, 'exec', ctx.job, '--', process.execPath, ...runnerArgs(ctx)], { cwd: ctx.repo, env: runnerEnv(ctx, env), stdio: 'ignore' })
+  const status = await finished(exec)
+  assert.equal(await tailed, 0)
+  clearTimeout(killer)
+  return { status, lines: stdout.split('\n').filter(Boolean) }
+}
+
+test('tail shows each gate check and verifier run between agy steps, in order', () => {
+  const ctx = setup({ calls: [['pkg/src/b.ts', 'export const b = 1\n']], rounds: [[['pkg/src/b.ts', 'export const b = 2\n']]] })
+  const r = run(ctx, verified('1,0', 'PASS'))
+  assert.equal(r.status, 0, r.report)
+  const lines = snapshot(ctx)
+  assertInOrder(lines, [
+    /^agy-test · /,
+    /^agy started: gemini-3\.8-flash-low/,
+    /^write_to_file {2}pkg\/src\/b\.ts$/,
+    /^says: Fake agy finished\.$/,
+    gate(1, 'lint and type-check started \\(stopped after 570s\\)$'),
+    gate(1, 'lint and type-check FAILED, 1 added, 0 removed \\(\\d+s\\)$'),
+    gate(1, 'sent back to agy \\(1 of 3\\)$'),
+    /^write_to_file {2}pkg\/src\/b\.ts$/,
+    /^says: Fake agy round 2\.$/,
+    gate(2, 'lint and type-check started'),
+    gate(2, 'lint and type-check OK, 0 added, 0 removed \\(\\d+s\\)$'),
+    gate(2, 'verifier started: gemini-3\\.8-flash-medium, pid \\d+, stopped after 450s$'),
+    gate(2, 'verifier PASS \\(\\d+s\\)$'),
+    gate(2, 'OK, agy may stop$'),
+    /^agy's turn ended: SUCCESS/,
+  ])
+  assert.equal(lines.filter(l => l.startsWith('gate round')).length, 8)
+  // The nested verifier's own tool calls stay out of the job's progress.
+  assert.ok(!lines.some(l => /view_file|diff-numbered/.test(l)), lines.join('\n'))
+  // The file holds display text and the size of events.jsonl at the time, nothing the runner decides on.
+  const written = fs.readFileSync(path.join(ctx.job, 'progress.jsonl'), 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l))
+  assert.equal(written.length, 8)
+  assert.deepEqual(written.map(w => w.offset), written.map(w => w.offset).sort((a, b) => a - b))
+  assert.ok(written.every(w => w.offset > 0 && typeof w.text === 'string'))
+})
+
+test('tail shows a verifier that timed out, and the stop the hook allowed', () => {
+  const ctx = changed()
+  const r = run(ctx, verified('0', 'hang', { AGY_DELEGATE_VERIFIER_DEADLINE_S: '2' }))
+  assert.equal(r.status, 17, r.report)
+  assertInOrder(snapshot(ctx), [
+    gate(1, 'lint and type-check OK, 0 added, 0 removed'),
+    gate(1, 'verifier started: gemini-3\\.8-flash-medium, pid \\d+, stopped after 2s$'),
+    gate(1, 'verifier timed out after 2s, so no verdict$'),
+    gate(1, 'FAILED, stop allowed: the verifier produced no verdict: the verifier ran past 2s and was stopped$'),
+  ])
+  assert.equal(JSON.parse(fs.readFileSync(path.join(ctx.job, 'verifier', 'result-1.json'), 'utf8')).timedOut, true)
+})
+
+test('tail shows a gate check that cannot run, and the stop the hook allowed', () => {
+  const ctx = setup()
+  const r = run(ctx, fake('2'))
+  assert.equal(r.status, 17, r.report)
+  assertInOrder(snapshot(ctx), [gate(1, 'lint and type-check started'), gate(1, 'lint and type-check could not finish after \\d+s: '), gate(1, 'error, stop allowed: ')])
+})
+
+test('tail shows the runner checking the tree agy left when no Stop hook ran', () => {
+  const ctx = changed()
+  const r = run(ctx, verified('1', 'PASS', { FAKE_STOP_HOOK: '0' }))
+  assert.equal(r.status, 17, r.report)
+  const runner = ' \\(runner, after agy exited\\)'
+  assertInOrder(snapshot(ctx), [
+    /^agy's turn ended: /,
+    new RegExp(`^gate round 1${runner}: no check covers the tree agy left, so the runner checks it$`),
+    new RegExp(`^gate round 1${runner}: lint and type-check started`),
+    new RegExp(`^gate round 1${runner}: lint and type-check FAILED, 1 added, 0 removed`),
+    new RegExp(`^gate round 1${runner}: FAILED$`),
+  ])
+})
+
+test('tail shows a stop with work still running as a skipped check that spends no round', () => {
+  const ctx = changed()
+  const r = run(ctx, verified('0', 'PASS', { FAKE_BUSY_STOP: 'mid' }))
+  assert.equal(r.status, 0, r.report)
+  assertInOrder(snapshot(ctx), [
+    /^gate: agy stopped with work still running, so no check this time$/,
+    gate(1, 'lint and type-check started'),
+    gate(1, 'OK, agy may stop'),
+  ])
+})
+
+test('tail places a gate line by the byte size of events.jsonl, also after non-ASCII text', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tail-offset-'))
+  try {
+    const job = path.join(dir, 'agy-x')
+    fs.mkdirSync(job)
+    fs.writeFileSync(path.join(job, 'meta.json'), JSON.stringify({ id: 'agy-x', status: 'completed', cwd: '/w' }))
+    const events = [
+      { event: 'init', init: { model: 'm', cwd: '/w' } },
+      { event: 'step_update', step_update: { step_index: 1, state: 'DONE', step_type: 'agent_response', text_delta: 'héllo wörld ✓ ünïcode' } },
+      { event: 'step_update', step_update: { step_index: 2, state: 'ACTIVE', step_type: 'tool', tool_name: 'view_file', tool_info: { parameters: { AbsolutePath: '/w/a.ts' } } } },
+    ].map(e => `${JSON.stringify(e)}\n`)
+    fs.writeFileSync(path.join(job, 'events.jsonl'), events.join(''))
+    const after = n => events.slice(0, n).reduce((sum, l) => sum + Buffer.byteLength(l), 0)
+    const marks = [[after(0), 'before all'], [after(2), 'after the answer'], [after(3), 'after the tool'], [after(3) + 5000, 'past the end']]
+    fs.writeFileSync(path.join(job, 'progress.jsonl'), `${marks.map(([offset, text]) => JSON.stringify({ offset, text })).join('\n')}\nnot json\n`)
+    const lines = spawnSync(process.execPath, [JOBS, 'tail', job, '-n', '50'], { env: { ...process.env, DELEGATE_JOBS_DIR: dir }, encoding: 'utf8' }).stdout.split('\n').filter(Boolean)
+    assert.deepEqual(lines.slice(1), ['before all', 'agy started: m in /w', 'says: héllo wörld ✓ ünïcode', 'after the answer', 'view_file  a.ts', 'after the tool', 'past the end'])
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('jobs shows the verifier verdict beside the gate verdict', () => {
+  const listed = ctx => spawnSync(process.execPath, [JOBS, 'jobs', '--all'], { env: tailEnv(ctx), encoding: 'utf8' }).stdout.split('\n').find(l => l.startsWith('agy-test '))
+  const cases = [
+    [verified('0', 'PASS'), 0, / gate OK · verifier PASS$/],
+    [verified('0', 'FAIL'), 17, / gate FAILED · verifier FAIL \(1\)$/],
+    [verified('0', 'crash', { AGY_DELEGATE_VERIFIER_DEADLINE_S: '2' }), 17, / gate FAILED · verifier no verdict$/],
+    [fake('1'), 17, / gate FAILED$/],
+  ]
+  for (const [options, status, line] of cases) {
+    const ctx = changed()
+    assert.equal(run(ctx, options).status, status)
+    assert.match(listed(ctx), line)
+  }
+})
+
+test('tail -f prints the gate lines as the job runs, then its outcome', async () => {
+  const ctx = setup({ calls: [['pkg/src/b.ts', 'export const b = 1\n']], rounds: [[['pkg/src/b.ts', 'export const b = 2\n']]] })
+  const { status, lines } = await watched(ctx, ['-f'], verified('1,0', 'PASS').env)
+  assert.equal(status, 0)
+  assertInOrder(lines, [
+    /^agy-test · /,
+    gate(1, 'lint and type-check started'),
+    gate(1, 'sent back to agy \\(1 of 3\\)'),
+    gate(2, 'verifier started: '),
+    gate(2, 'verifier PASS'),
+    gate(2, 'OK, agy may stop'),
+    /^agy's turn ended: SUCCESS/,
+    /^agy-test completed \(exit 0/,
+  ])
+})
+
+test('tail --next -f --every prints the gate lines as they happen and condenses the rest', async () => {
+  const ctx = setup({ calls: [['pkg/src/b.ts', 'export const b = 1\n']] })
+  // agy starts working 3 s in, after tail has attached: a condensed tail prints nothing of what came before.
+  const { status, lines } = await watched(ctx, ['--next', '-f', '--every', '1m'], verified('0', 'PASS', { FAKE_DELAY_START: '3' }).env)
+  assert.equal(status, 0)
+  const prefix = 'agy-test · '
+  assertInOrder(lines, [
+    gate(1, 'lint and type-check started', prefix),
+    gate(1, 'lint and type-check OK, 0 added, 0 removed', prefix),
+    gate(1, 'verifier started: ', prefix),
+    gate(1, 'verifier PASS', prefix),
+    gate(1, 'OK, agy may stop', prefix),
+    /^agy-test completed \(exit 0/,
+  ])
+  // The one-minute summary is not due, so agy's own steps are not printed.
+  assert.ok(!lines.some(l => /^write_to_file/.test(l)), lines.join('\n'))
 })
