@@ -285,7 +285,7 @@ Implement jobs with a gate also hold `gate/`: the baseline and each round's snap
 `agy-verifier/` (the verifier's agent and hook) and `verifier/` (each run's inputs, events and
 verdict).
 Old jobs are pruned after 7 days.
-`jobs.mjs`, `diff.mjs` and `gate.mjs` are shared with the `codex-delegate` plugin, which has identical
+`jobs.mjs`, `clean-line.mjs`, `diff.mjs` and `gate.mjs` are shared with the `codex-delegate` plugin, which has identical
 copies. Each `new` copies them to `~/.claude/delegate-jobs/`, a path that does not depend on where the
 plugin is installed.
 

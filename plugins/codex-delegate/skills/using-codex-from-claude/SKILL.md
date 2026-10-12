@@ -248,8 +248,8 @@ last line, and the latest one) and then the job's outcome. Drop `--every` to get
 costs the watching agent more context. Use `tail <job> -f` when the job is already known.
 
 Job directories live in `~/.claude/delegate-jobs/` (override with `DELEGATE_JOBS_DIR`) and are pruned
-after 7 days. `scripts/jobs.mjs`, `scripts/diff.mjs` and `scripts/gate.mjs` are shared with the
-`agy-delegate` plugin, which has identical copies. Each `new` copies all three to
+after 7 days. `scripts/jobs.mjs`, `scripts/clean-line.mjs`, `scripts/diff.mjs` and `scripts/gate.mjs` are shared with the
+`agy-delegate` plugin, which has identical copies. Each `new` copies all four to
 `~/.claude/delegate-jobs/`, a path that does not depend on where the plugin is installed.
 
 ## Diff and applicable rules
