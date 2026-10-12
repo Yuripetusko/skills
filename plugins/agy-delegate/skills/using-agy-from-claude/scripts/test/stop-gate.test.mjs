@@ -91,7 +91,7 @@ test('findings in rounds 1-3 and a clean 4th check: three continues, then exit 0
   assert.match(r.report, /^## Gates\n- GATE OK: 0 added, 0 removed · 4 round\(s\), 3 sent back\n/)
   assert.equal((r.report.match(/sent back to agy/g) ?? []).length, 3)
   assert.match(r.report, /- round 4: OK, 0 added, 0 removed, \d+s, stop allowed/)
-  assert.deepEqual(r.meta.gate, { verdict: 'OK', added: 0, removed: 0, round: 4, rounds: 4 })
+  assert.deepEqual(r.meta.gate, { verdict: 'OK', added: 0, removed: 0, outside: 0, round: 4, rounds: 4 })
   assert.deepEqual(
     r.gateCalls.map(a => a.slice(0, 1).concat(a.slice(3))),
     [['baseline'], ['check', '--round', '1'], ['check', '--round', '2'], ['check', '--round', '3'], ['check', '--round', '4']],
@@ -250,7 +250,8 @@ test('real gate: an `as any` goes back to agy, the fix passes the next check', (
   assert.match(r.report, /- round 1: FAILED, 1 added, 0 removed, \d+s, sent back to agy\n- round 2: OK, 0 added, 0 removed, \d+s, stop allowed/)
   assert.match(r.report, /- baseline: GATE BASELINE: 0 finding\(s\) from 1 command\(s\)/)
   assert.deepEqual(r.state.gate.scope.units, ['pkg'])
-  assert.equal(r.meta.gate.verdict, 'OK')
+  // `gate check --job` wrote each round's record; the runner's final write keeps its shape.
+  assert.deepEqual(r.meta.gate, { verdict: 'OK', added: 0, removed: 0, outside: 0, round: 2, rounds: 2 })
 })
 
 test('real gate: a broken lint command fails the baseline with exit 18', () => {

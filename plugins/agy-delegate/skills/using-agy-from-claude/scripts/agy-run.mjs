@@ -386,15 +386,14 @@ function gateOutcome(dir, gate, runId) {
     verdict === 'FAILED'
       ? `gate FAILED after ${g?.continues ?? 0} round(s) sent back: ${last?.added ?? '?'} finding(s) added${last?.outside ? `, ${last.outside} file(s) outside the baseline scope` : ''}`
       : `gate error: ${reason}`
-  const meta = { verdict, ...(last ? { added: last.added, removed: last.removed, round: last.round } : {}), rounds: g?.round ?? 0 }
+  // All five fields of `gate check`'s record, so none is left from a check that died after `pending`.
+  const meta = { verdict, added: last?.added ?? 0, removed: last?.removed ?? 0, outside: last?.outside ?? 0, round: last?.round ?? 0, rounds: g?.round ?? 0 }
   return { verdict, head, lines, why, meta }
 }
 
-// meta.gate may hold fields `gate check --job` wrote; the runner owns the verdict and the rounds.
-function setMetaGate(dir, patch, extra = {}) {
-  const current = tryJson(path.join(dir, 'meta.json'))?.gate ?? {}
-  updateMeta(dir, { ...extra, gate: { ...current, ...patch } })
-}
+// meta.gate also holds what `gate check --job` writes each round. The runner sets the final verdict
+// and `rounds`, merged into the fresh record under updateMeta's lock.
+const setMetaGate = (dir, patch, extra = {}) => updateMeta(dir, meta => ({ ...extra, gate: { ...(meta.gate ?? {}), ...patch } }))
 
 function report({ cwd, dir, model, exit, why, result, events, before, readOnly, stopped, denies, loaded, gates }) {
   // Count a tool call when it starts: a backgrounded command never reaches DONE.

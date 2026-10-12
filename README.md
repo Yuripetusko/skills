@@ -32,8 +32,8 @@ The implementers take header lines at the top of the brief:
 - `install: yes`: runs the repo's `setup-worktree` script, or a frozen install.
 - `commit: <message>`: commits on the Claude side once the change stays inside `paths`.
 
-Tests, lint and type-check stay with the caller, who should never take the delegate's own "tests
-pass" at face value.
+Tests stay with the caller, who should never take the delegate's own "tests pass" at face value. So
+do lint and type-check, unless the target repo has a gate config.
 
 **Lint and type-check gate for agy.** When the target repo commits `.agents/delegate-gate.json`,
 `agy-implementer` records lint and type-check findings before agy starts. A Stop hook checks again
