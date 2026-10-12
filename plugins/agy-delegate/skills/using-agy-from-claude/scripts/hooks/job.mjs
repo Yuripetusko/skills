@@ -69,6 +69,37 @@ export function jobDir() {
   return dir
 }
 
+// Reads the result of `gate check --round <n>` (`r` from runGate) and its delta file: the verdict, the
+// counts, and at most MAX_LINES lines of findings or error output to show agy or the report.
+const MAX_LINES = 35
+export function readCheck(dir, n, r) {
+  let delta = null
+  try {
+    delta = JSON.parse(fs.readFileSync(path.join(dir, 'gate', `delta-${n}.json`), 'utf8'))
+  } catch {}
+  const counts = delta?.complete ? { added: delta.added.length, removed: delta.removed.length, outside: delta.outsideScope?.length ?? 0 } : {}
+  const fields = { exit: r.status ?? r.signal ?? null, durationMs: r.durationMs, ...counts }
+  const clip = lines => (lines.length > MAX_LINES ? [...lines.slice(0, MAX_LINES - 1), `... and ${lines.length - MAX_LINES + 1} more`] : lines)
+  if (r.status === 0) return { verdict: 'OK', fields, lines: [] }
+  if (r.status === 1) {
+    // From the delta file, or without one the gate's own text minus its verdict and Details lines.
+    const lines = delta?.complete
+      ? [
+          ...delta.added.map(f => `+ ${f.rule}  ${f.file ?? '(no file)'}${f.line ? `:${f.line}:${f.column}` : ''}  ${String(f.message).split('\n')[0]}`),
+          ...(delta.outsideScope ?? []).map(o => `changed outside the baseline scope: ${o.file} (${o.reason})`),
+        ]
+      : r.stdout.trim().split('\n').slice(1).filter(l => l.trim() && !l.startsWith('Details: '))
+    return { verdict: 'FAILED', fields, lines: clip(lines) }
+  }
+  const why = r.timedOut
+    ? `gate check timed out after ${GATE_DEADLINE_S}s`
+    : r.error
+      ? `gate check could not start: ${r.error}`
+      : `gate check exited ${r.status ?? r.signal}`
+  const out = (r.stdout.trim() || r.stderr.trim()).split('\n').filter(Boolean)
+  return { verdict: 'error', fields, lines: out.slice(0, MAX_LINES), reason: `${why}${out[0] ? `: ${out[0]}` : ''}` }
+}
+
 export const readState = dir => JSON.parse(fs.readFileSync(path.join(dir, STATE), 'utf8'))
 // Through a rename, so pre-tool.mjs never reads a half-written file and denies the call.
 export function writeState(dir, state) {

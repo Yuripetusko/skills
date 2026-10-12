@@ -14,7 +14,9 @@
 // FAKE_STOP_HOOK=0  never call the Stop hooks
 // FAKE_HOOK_TIMEOUT_S  kill a hook after this many seconds instead of its configured timeout
 // FAKE_BUSY_STOP    `mid`: one Stop with fullyIdle false before the answer, as at a `wait` step;
-//                   `last`: every Stop says fullyIdle false
+//                   `mid-idle`: the same Stop with fullyIdle true; `last`: every Stop says fullyIdle false
+// FAKE_AFTER_MID_FILE  JSON list of tool calls to make after that mid-job Stop
+// FAKE_KILL_STOP=final  kill the Stop hooks after the answer within 1 ms, before they can write anything
 // Like agy 1.3.3, a Stop hook that exits non-zero, prints no JSON or times out lets the run stop, and
 // the 11th consecutive continue is ignored. Each Stop answer is logged as a `fake_stop_hook` event.
 
@@ -67,8 +69,8 @@ fs.readFileSync(0, 'utf8')
 const cwd = process.cwd()
 out({ event: 'init', init: { model: opt('--model'), cwd, tools: [], permission_mode: 'bypass' } })
 const handlers = event => Object.values(config).flatMap(spec => (spec[event] ?? []).flatMap(h => h.hooks ?? [h]))
-const callHook = (h, input) => {
-  const timeout = (Number(env.FAKE_HOOK_TIMEOUT_S) || h.timeout || 30) * 1000
+const callHook = (h, input, timeoutMs) => {
+  const timeout = timeoutMs ?? (Number(env.FAKE_HOOK_TIMEOUT_S) || h.timeout || 30) * 1000
   const r = spawnSync('sh', ['-c', h.command], { cwd: path.dirname(hooksFile), input: JSON.stringify(input), encoding: 'utf8', timeout, killSignal: 'SIGKILL' })
   if (r.status !== 0) return { failed: r.error?.code ?? r.signal ?? `exit ${r.status}` }
   try {
@@ -116,13 +118,18 @@ const answer = text => {
   return text
 }
 play(readList(env.FAKE_CALLS_FILE))
-const stopInput = (executionNum, fullyIdle) => ({ ...common, executionNum, terminationReason: fullyIdle ? 'NO_TOOL_CALL' : 'TERMINAL_STEP_TYPE', fullyIdle })
-if (useHooks && env.FAKE_BUSY_STOP === 'mid')
-  for (const h of handlers('Stop')) out({ event: 'fake_stop_hook', executionNum: 0, answer: callHook(h, stopInput(0, false)) })
+const stopInput = (executionNum, fullyIdle, terminationReason = 'NO_TOOL_CALL') => ({ ...common, executionNum, terminationReason, fullyIdle })
+if (useHooks && env.FAKE_BUSY_STOP?.startsWith('mid')) {
+  const input = stopInput(0, env.FAKE_BUSY_STOP === 'mid-idle', 'TERMINAL_STEP_TYPE')
+  for (const h of handlers('Stop')) out({ event: 'fake_stop_hook', executionNum: 0, answer: callHook(h, input) })
+  play(readList(env.FAKE_AFTER_MID_FILE))
+}
 let response = answer('Fake agy finished.')
 const rounds = readList(env.FAKE_ROUNDS_FILE)
 for (let executionNum = 0; useHooks && env.FAKE_STOP_HOOK !== '0'; executionNum++) {
-  const answers = handlers('Stop').map(h => callHook(h, stopInput(executionNum, env.FAKE_BUSY_STOP !== 'last')))
+  const kill = env.FAKE_KILL_STOP === 'final' ? 1 : undefined
+  const idle = env.FAKE_BUSY_STOP !== 'last'
+  const answers = handlers('Stop').map(h => callHook(h, stopInput(executionNum, idle, idle ? 'NO_TOOL_CALL' : 'TERMINAL_STEP_TYPE'), kill))
   const cont = answers.find(a => a.decision === 'continue')
   for (const a of answers) out({ event: 'fake_stop_hook', executionNum, answer: a })
   if (!cont || executionNum >= 10) break

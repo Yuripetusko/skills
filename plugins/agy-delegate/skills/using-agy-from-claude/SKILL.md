@@ -56,17 +56,21 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   without suppressing them. agy gets 3 such rounds. If the 4th check still fails, the hook lets agy
   stop and the job exits 17 (`gate`).
 - agy also stops mid-job, for example at a `wait` step while its own commands run. When the Stop
-  input says `fullyIdle: false`, the hook runs no check and spends no round. The verdict stays
-  `error` until a later check, so a job that ends there exits 17.
-- A check that cannot run, a Stop hook that crashes or times out (600 s), or a run that ends without
-  any check also exits 17. Only a clean check from this run counts.
+  input says `fullyIdle: false`, the hook runs no check and spends no round.
+- Each check records the git tree it checked. After agy exits, the runner takes a verdict only from
+  a check of this run on the tree agy left. When none covers it, the runner checks the tree itself
+  once: a Stop hook may have crashed or timed out (600 s), agy may have edited after its last check,
+  or no Stop came. That check failing or not running exits 17.
+- A rerun in the same job dir keeps the first baseline and the earlier rounds, so findings an
+  earlier execution added still count and the 3 rounds are shared.
 - `report.md` opens with a "Gates" section. Its first line is the verdict: `GATE OK`, `GATE FAILED`,
   `GATE ERROR` or `GATE: not configured`. Then come the baseline, one line per round and the findings
   still added. `meta.json` keeps the verdict and the rounds in `gate`.
 - Without a config the report says `GATE: not configured`, and nothing is checked.
 - agy's `--print-timeout` gets 40 extra minutes for gate rounds (4 checks at the hook's 600 s
-  timeout), capped so the runner ends within 110 minutes of its start. Whether hook time counts
-  against `--print-timeout` is not measured yet. The runner's own kill timer allows for both.
+  timeout). It is capped so the runner ends within 110 minutes of its start, its own check after
+  agy exits included. Whether hook time counts against `--print-timeout` is not measured yet. The
+  runner's own kill timer allows for both.
 - `--gate-config <path>` on `run` points at a config outside the checkout, for tests.
 
 ## Runtime

@@ -1,38 +1,17 @@
 #!/usr/bin/env node
 // agy Stop hook: runs the lint and type-check gate (`jobs.mjs gate check`) each time agy wants to stop.
-// While the change adds findings it answers continue with them, up to ROUND_CAP times. After that it
-// lets agy stop with the verdict FAILED, and agy-run.mjs exits 17. agy also lets a stop through when
-// this hook crashes, prints anything else or times out, so each round records the verdict `error` in
-// state.json first and replaces it only with a real result.
+// While the change adds findings it answers continue with them, up to ROUND_CAP times per job. After
+// that it lets agy stop with the verdict FAILED. Each check records the git tree it checked, and
+// agy-run.mjs takes a verdict only for the tree agy left: agy also stops when this hook crashes, prints
+// anything else or times out, so a later edit may have no check. The runner then checks once itself.
 // stdout carries the decision JSON and nothing else: the gate's output is piped.
 
-import fs from 'node:fs'
 import path from 'node:path'
-import { GATE_DEADLINE_S, isVerifier, jobDir, logLine, readState, readStdin, ROUND_CAP, runGate, stateHash, writeState } from './job.mjs'
+import { snapshotTree } from '../gate.mjs'
+import { GATE_DEADLINE_S, isVerifier, jobDir, logLine, readCheck, readState, readStdin, ROUND_CAP, runGate, stateHash, writeState } from './job.mjs'
 
 // agy stops on any decision other than "continue".
 const STOP = JSON.stringify({ decision: 'stop' })
-const MAX_LINES = 35
-
-const tryJson = file => {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'))
-  } catch {
-    return null
-  }
-}
-
-// The added findings and the files outside the baseline scope, from the delta file. Without one, the
-// gate's own text minus its verdict and Details lines.
-function findingLines(delta, stdout) {
-  const lines = delta?.complete
-    ? [
-        ...delta.added.map(f => `+ ${f.rule}  ${f.file ?? '(no file)'}${f.line ? `:${f.line}:${f.column}` : ''}  ${String(f.message).split('\n')[0]}`),
-        ...(delta.outsideScope ?? []).map(o => `changed outside the baseline scope: ${o.file} (${o.reason})`),
-      ]
-    : stdout.trim().split('\n').slice(1).filter(l => l.trim() && !l.startsWith('Details: '))
-  return lines.length > MAX_LINES ? [...lines.slice(0, MAX_LINES - 1), `... and ${lines.length - MAX_LINES + 1} more`] : lines
-}
 
 const continueReason = (lines, attempt) =>
   [
@@ -60,15 +39,14 @@ async function round(raw) {
   } catch {}
   // agy also stops mid-job, for example at a `wait` step while its own commands run (terminationReason
   // TERMINAL_STEP_TYPE in agy 1.3.3). A check then races those commands and could spend a round on
-  // half-done work, so it waits for a stop with nothing running. The verdict drops to error until
-  // then, so a job that ends here fails.
+  // half-done work, so it waits for a stop with nothing running.
   if (input.fullyIdle === false) {
     save({ verdict: 'error', reason: 'agy stopped with work still running, and no check ran after that' })
     logLine(dir, { hook: 'Stop', decision: 'stop', skipped: 'not idle', terminationReason: input.terminationReason ?? null })
     return STOP
   }
   save({ round: n, verdict: 'error', reason: `the Stop hook did not finish round ${n}` })
-  const entry = { round: n, executionNum: input.executionNum ?? null, terminationReason: input.terminationReason ?? null, fullyIdle: input.fullyIdle ?? null }
+  const entry = { run, round: n, executionNum: input.executionNum ?? null, terminationReason: input.terminationReason ?? null, fullyIdle: input.fullyIdle ?? null }
   const finish = (verdict, action, fields, patch = {}) => {
     const h = { ...entry, verdict, action, ...fields }
     save({ verdict, history: [...(readState(dir).gate?.history ?? []), h], ...patch })
@@ -84,32 +62,27 @@ async function round(raw) {
     return STOP
   }
 
+  // The tree the check starts from. A check that later reads edited files no longer matches the tree
+  // agy leaves, so the runner checks again.
+  const tree = snapshotTree(state.worktree, path.join(dir, 'gate'))
   const r = await runGate(['check', '--job', dir, '--round', String(n)], { cwd: state.worktree, deadlineS: GATE_DEADLINE_S }).done
-  const delta = tryJson(path.join(dir, 'gate', `delta-${n}.json`))
-  const counts = delta?.complete ? { added: delta.added.length, removed: delta.removed.length, outside: delta.outsideScope?.length ?? 0 } : {}
-  const fields = { exit: r.status ?? r.signal ?? null, durationMs: r.durationMs, ...counts }
-  if (r.status === 0) {
+  const c = readCheck(dir, n, r)
+  const fields = { tree, ...c.fields, ...(c.lines.length ? { lines: c.lines } : {}) }
+  if (c.verdict === 'OK') {
     // The verifier (agy-verifier-ticket.md) runs here, once the gate is clean.
     finish('OK', 'stop', fields, { reason: null })
     return STOP
   }
-  if (r.status === 1) {
-    const lines = findingLines(delta, r.stdout)
+  if (c.verdict === 'FAILED') {
     const continues = state.gate?.continues ?? 0
     if (continues < ROUND_CAP) {
-      finish('FAILED', 'continue', { ...fields, lines }, { continues: continues + 1, reason: null })
-      return JSON.stringify({ decision: 'continue', reason: continueReason(lines, continues + 1) })
+      finish('FAILED', 'continue', fields, { continues: continues + 1, reason: null })
+      return JSON.stringify({ decision: 'continue', reason: continueReason(c.lines, continues + 1) })
     }
-    finish('FAILED', 'stop', { ...fields, lines }, { reason: `the change still adds findings after ${ROUND_CAP} rounds` })
+    finish('FAILED', 'stop', fields, { reason: `the change still adds findings after ${ROUND_CAP} rounds` })
     return STOP
   }
-  const why = r.timedOut
-    ? `gate check timed out after ${GATE_DEADLINE_S}s`
-    : r.error
-      ? `gate check could not start: ${r.error}`
-      : `gate check exited ${r.status ?? r.signal}`
-  const out = (r.stdout.trim() || r.stderr.trim()).split('\n').filter(Boolean)
-  finish('error', 'stop', { ...fields, lines: out.slice(0, MAX_LINES) }, { reason: `${why}${out[0] ? `: ${out[0]}` : ''}` })
+  finish('error', 'stop', { ...c.fields, lines: c.lines }, { reason: c.reason })
   return STOP
 }
 

@@ -90,7 +90,7 @@ test('findings in rounds 1-3 and a clean 4th check: three continues, then exit 0
   assert.ok(r.stops[0].reason.split('\n').length <= 40)
   assert.match(r.report, /^## Gates\n- GATE OK: 0 added, 0 removed · 4 round\(s\), 3 sent back\n/)
   assert.equal((r.report.match(/sent back to agy/g) ?? []).length, 3)
-  assert.match(r.report, /- round 4: OK, 0 added, 0 removed, \d+s, stop allowed/)
+  assert.match(r.report, /- round 4: OK, 0 added, 0 removed, \d+s, stop allowed\n- round 4's check covers the tree agy left\n/)
   assert.deepEqual(r.meta.gate, { verdict: 'OK', added: 0, removed: 0, outside: 0, round: 4, rounds: 4 })
   assert.deepEqual(
     r.gateCalls.map(a => a.slice(0, 1).concat(a.slice(3))),
@@ -105,7 +105,7 @@ test('findings in all four checks: the cap allows the stop, exit 17 lists what i
   assert.equal(r.status, 17, r.report)
   assert.deepEqual(r.stops.map(a => a.decision), ['continue', 'continue', 'continue', 'stop'])
   assert.match(r.report, /^## Gates\n- GATE FAILED: 1 added, 0 removed · 4 round\(s\), 3 sent back\n/)
-  assert.match(r.report, /- round 4: FAILED, 1 added, 0 removed, \d+s, stop allowed\n- still failing:\n {2}\+ typescript\(no-explicit-any\)/)
+  assert.match(r.report, /- round 4: FAILED, 1 added, 0 removed, \d+s, stop allowed\n- round 4's check covers the tree agy left\n- still failing:\n {2}\+ typescript\(no-explicit-any\)/)
   assert.match(r.report, /- exit 17 \(gate\): gate FAILED after 3 round\(s\) sent back: 1 finding\(s\) added/)
   assert.equal(r.meta.gate.verdict, 'FAILED')
   assert.equal(r.meta.gate.rounds, 4)
@@ -114,13 +114,13 @@ test('findings in all four checks: the cap allows the stop, exit 17 lists what i
   assert.match(r.stdout, /Fake agy finished\.\nFake agy round 2\.\nFake agy round 3\.\nFake agy round 4\./)
 })
 
-test('a gate that cannot run mid-job lets agy stop and fails the job with exit 17', () => {
+test('a check that cannot run mid-job leaves the last result on the same tree, FAILED: exit 17', () => {
   const ctx = setup()
   const r = run(ctx, fake('1,2'))
   assert.equal(r.status, 17, r.report)
   assert.deepEqual(r.stops.map(a => a.decision), ['continue', 'stop'])
-  assert.match(r.report, /- GATE ERROR: gate check exited 2: GATE ERROR: could not run \(round 2\)/)
-  assert.equal(r.meta.gate.verdict, 'error')
+  assert.match(r.report, /- round 2: error, \d+s, stop allowed\n- round 1's check covers the tree agy left/)
+  assert.equal(r.meta.gate.verdict, 'FAILED')
 })
 
 test('a Stop hook killed mid-check never reads as OK', () => {
@@ -128,33 +128,39 @@ test('a Stop hook killed mid-check never reads as OK', () => {
   const r = run(ctx, fake('1,kill'))
   assert.equal(r.status, 17, r.report)
   assert.equal(r.stops.at(-1).failed, 'SIGKILL')
-  assert.match(r.report, /GATE ERROR: the Stop hook did not finish round 2/)
-  assert.equal(r.meta.gate.verdict, 'error')
+  assert.match(r.report, /^## Gates\n- GATE FAILED/)
+  assert.equal(r.meta.gate.verdict, 'FAILED')
 })
 
-test('a Stop hook that times out fails the job, and the runner stops the gate it left behind', () => {
+test('a Stop hook that times out: the runner stops the gate it left and checks the tree itself', () => {
   const ctx = setup()
-  const r = run(ctx, { env: { ...fake('hang').env, FAKE_HOOK_TIMEOUT_S: '2' } })
+  const r = run(ctx, { env: { ...fake('hang,1').env, FAKE_HOOK_TIMEOUT_S: '2' } })
   assert.equal(r.status, 17, r.report)
-  assert.match(r.report, /GATE ERROR: the Stop hook did not finish round 1/)
+  assert.match(r.report, /- round 2: FAILED, 1 added, 0 removed, \d+s, checked by the runner after agy exited/)
   assert.match(r.report, /stopped processes agy left running: /)
   const ps = spawnSync('ps', ['-A', '-o', 'command='], { encoding: 'utf8' }).stdout
   assert.ok(!ps.includes(`--job ${ctx.job}`), 'the hung gate check still runs')
 })
 
-test('a run whose Stop hook never fires fails with exit 17', () => {
+test('a run whose Stop hook never fires gets one check from the runner', () => {
   const ctx = setup()
-  const r = run(ctx, { env: { ...fake('0').env, FAKE_STOP_HOOK: '0' } })
+  const r = run(ctx, { env: { ...fake('1').env, FAKE_STOP_HOOK: '0' } })
   assert.equal(r.status, 17, r.report)
-  assert.match(r.report, /GATE ERROR: no gate check ran in this execution/)
+  assert.deepEqual(r.gateCalls.map(a => a[0]), ['baseline', 'check'])
+  assert.match(r.report, /- the runner checked the tree agy left in round 1/)
 })
 
-test('a Stop verdict from an earlier execution does not count', () => {
+test('a rerun keeps the baseline and the rounds; an earlier OK is not reused', () => {
   const ctx = setup()
   assert.equal(run(ctx, fake('0')).status, 0)
+  const baseline = fs.readFileSync(path.join(ctx.job, 'gate', 'baseline.json'), 'utf8')
   // A rerun in the same job dir whose Stop hook never fires.
   const r = run(ctx, { env: { ...fake('0').env, FAKE_STOP_HOOK: '0' } })
-  assert.equal(r.status, 17, r.report)
+  assert.equal(r.status, 0, r.report)
+  assert.equal(fs.readFileSync(path.join(ctx.job, 'gate', 'baseline.json'), 'utf8'), baseline)
+  assert.deepEqual(r.gateCalls.map(a => a[0]), ['baseline', 'check', 'check'])
+  assert.match(r.report, /- baseline: GATE BASELINE: 0 finding\(s\), kept from an earlier execution of this job/)
+  assert.match(r.report, /- round 1: OK, 0 added, 0 removed, \d+s, stop allowed \(earlier execution\)\n- round 2: OK, .*checked by the runner/)
 })
 
 test('a Stop while agy still has work running runs no check and spends no round', () => {
@@ -167,12 +173,12 @@ test('a Stop while agy still has work running runs no check and spends no round'
   assert.equal(r.state.gate.history[0].fullyIdle, true)
 })
 
-test('a run that ends at a Stop with work still running fails with exit 17', () => {
+test('a run that ends at a Stop with work still running gets one check from the runner', () => {
   const ctx = setup()
-  const r = run(ctx, { env: { ...fake('0').env, FAKE_BUSY_STOP: 'last' } })
+  const r = run(ctx, { env: { ...fake('1').env, FAKE_BUSY_STOP: 'last' } })
   assert.equal(r.status, 17, r.report)
-  assert.deepEqual(r.gateCalls.map(a => a[0]), ['baseline'])
-  assert.match(r.report, /GATE ERROR: agy stopped with work still running, and no check ran after that/)
+  assert.deepEqual(r.gateCalls.map(a => a[0]), ['baseline', 'check'])
+  assert.match(r.report, /- round 1: FAILED, .*checked by the runner after agy exited/)
 })
 
 test('a baseline that cannot run exits 18 before agy starts, with the gate output in report.md', () => {
@@ -278,4 +284,40 @@ test('real gate: a broken lint command fails the baseline with exit 18', () => {
   assert.equal(r.status, 18, r.stderr)
   assert.match(r.report, /GATE ERROR: the baseline could not run/)
   assert.match(r.report, /lint:pkg {2}\d+s {2}exited 2/)
+})
+
+test('real gate: a retry that keeps the findings exits 17 and cannot pass the continue cap', () => {
+  const ctx = setup({ calls: [['pkg/src/b.ts', "export const b = JSON.parse('1') as any\n"]] })
+  const args = realGate(ctx)
+  const first = run(ctx, { args })
+  assert.equal(first.status, 17, first.report)
+  // The retry changes nothing. A fresh baseline would see the finding as old and pass.
+  fs.writeFileSync(ctx.calls, '[]')
+  const r = run(ctx, { args })
+  assert.equal(r.status, 17, r.report)
+  // events.jsonl holds both executions.
+  assert.deepEqual(r.stops.slice(first.stops.length).map(a => a.decision), ['stop'])
+  assert.match(r.report, /kept from an earlier execution of this job/)
+  assert.match(r.report, /- round 5: FAILED, 1 added, 0 removed, \d+s, stop allowed\n/)
+  assert.equal(r.state.gate.continues, 3)
+})
+
+test('real gate: an OK, then an edit, then a final Stop hook killed at once must not exit 0', () => {
+  const ctx = setup({ calls: [['pkg/src/b.ts', 'export const b = 1\n']] })
+  fs.writeFileSync(path.join(ctx.root, 'after-mid.json'), JSON.stringify([ctx.write('pkg/src/b.ts', "export const b = JSON.parse('1') as any\n")]))
+  const env = { FAKE_BUSY_STOP: 'mid-idle', FAKE_AFTER_MID_FILE: path.join(ctx.root, 'after-mid.json'), FAKE_KILL_STOP: 'final' }
+  const r = run(ctx, { args: realGate(ctx), env })
+  assert.equal(r.status, 17, r.report)
+  assert.equal(r.stops[0].decision, 'stop')
+  assert.equal(r.stops.at(-1).failed, 'ETIMEDOUT')
+  assert.match(r.report, /- round 1: OK, 0 added, 0 removed, \d+s, stop allowed\n- round 2: FAILED, 1 added, 0 removed, \d+s, checked by the runner after agy exited/)
+  assert.equal(r.meta.gate.verdict, 'FAILED')
+})
+
+test('real gate: an OK whose tree agy left unchanged stands without another check', () => {
+  const ctx = setup({ calls: [['pkg/src/b.ts', 'export const b = 1\n']] })
+  const r = run(ctx, { args: realGate(ctx), env: { FAKE_BUSY_STOP: 'mid-idle', FAKE_KILL_STOP: 'final' } })
+  assert.equal(r.status, 0, r.report)
+  assert.match(r.report, /- round 1's check covers the tree agy left/)
+  assert.equal(r.state.gate.history.length, 1)
 })

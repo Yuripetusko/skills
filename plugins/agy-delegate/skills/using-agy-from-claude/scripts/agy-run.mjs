@@ -13,7 +13,8 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { CANARY, readHookLog, readState, ROUND_CAP, runGate, STOP_TIMEOUT_S, stateHash, writeState } from './hooks/job.mjs'
+import { snapshotTree } from './gate.mjs'
+import { CANARY, GATE_DEADLINE_S, readCheck, readHookLog, readState, ROUND_CAP, runGate, STOP_TIMEOUT_S, stateHash, writeState } from './hooks/job.mjs'
 import { updateMeta } from './jobs.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -187,6 +188,14 @@ function writeJobConfig({ dir, cwd, mode, readOnly, model, paths, gate }) {
     .replace(/ +\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
   fs.writeFileSync(path.join(agyDir, '.agents', 'agents', `${AGENT}.md`), agent)
+  // An earlier execution of this job left its rounds here. With its baseline kept, they carry over, so
+  // the continue cap holds across reruns. Only the per-execution fields start fresh.
+  let earlier = null
+  if (gate?.kept) {
+    try {
+      earlier = readState(dir).gate
+    } catch {}
+  }
   const state = { job: dir, worktree, mode, readOnly: Boolean(readOnly), paths, agent: AGENT, model, createdAt: new Date().toISOString() }
   // stop.mjs adds its rounds here. The scope is the baseline's: the units its commands cover.
   if (gate) {
@@ -195,14 +204,16 @@ function writeJobConfig({ dir, cwd, mode, readOnly, model, paths, gate }) {
       config: gate.baseline?.config ?? null,
       scope: scope ? { whole: scope.whole, reason: scope.reason, seeds: scope.seeds, units: scope.units } : null,
       cap: ROUND_CAP,
-      round: 0,
-      continues: 0,
+      round: earlier?.round ?? 0,
+      continues: earlier?.continues ?? 0,
       verdict: null,
-      history: [],
+      reason: null,
+      run: null,
+      history: earlier?.history ?? [],
     }
   }
   writeState(dir, state)
-  return { agyDir, stateSha: stateHash(state) }
+  return { agyDir, stateSha: stateHash(state), worktree }
 }
 
 const SLASH_TIMEOUT_S = 60
@@ -358,38 +369,86 @@ async function gateBaseline(dir, cwd, configPath) {
   return { error: `gate baseline exited ${r.status ?? r.signal}`, output }
 }
 
-// The gate verdict of this execution, from the rounds stop.mjs recorded in state.json. Only a round
-// with this execution's run id counts, and anything but OK fails the job.
-function gateOutcome(dir, gate, runId) {
-  if (!gate.configured) return { verdict: 'not configured', head: gate.line, lines: [] }
-  let g = null
+// After agy exits, the verdict must cover the tree agy left. The last OK or FAILED check of this
+// execution counts only when the tree it checked is the current one. Otherwise, when agy finished
+// normally, the runner runs one check itself; when agy failed, the verdict is error. Returns
+// {verdict, reason, decidedBy, how} and records it in state.json.
+async function settleGate(dir, worktree, runId, mayCheck) {
+  const current = readState(dir).gate ?? {}
+  const g = current.run === runId ? current : { ...current, verdict: null, reason: null }
+  const settle = (patch, history = g.history ?? []) => {
+    const s = readState(dir)
+    s.gate = { ...s.gate, ...g, ...patch, history, run: runId }
+    writeState(dir, s)
+    return patch
+  }
+  const checked = (g.history ?? []).filter(h => h.run === runId && ['OK', 'FAILED'].includes(h.verdict) && h.tree).at(-1)
+  let tree = null
   try {
-    g = readState(dir).gate
+    tree = snapshotTree(worktree, path.join(dir, 'gate'))
+  } catch (error) {
+    log(`gate: could not read the tree agy left: ${error.message}`)
+  }
+  if (tree && checked?.tree === tree) {
+    const reason = checked.verdict === 'FAILED' ? (g.reason ?? 'the change still adds findings') : null
+    return settle({ verdict: checked.verdict, reason, decidedBy: checked.round, how: 'matched' })
+  }
+  if (!mayCheck) return settle({ verdict: 'error', reason: 'no gate check covers the tree agy left', decidedBy: null, how: 'unchecked' })
+
+  const n = (g.round ?? 0) + 1
+  log(`gate: no check covers the tree agy left; the runner checks it (round ${n})`)
+  settle({ round: n, verdict: 'error', reason: `the runner's check (round ${n}) did not finish`, decidedBy: n, how: 'runner' })
+  const check = runGate(['check', '--job', dir, '--round', String(n)], { cwd: worktree, deadlineS: GATE_DEADLINE_S })
+  const cancel = () => check.stop()
+  for (const sig of Object.keys(SIGNALS)) process.on(sig, cancel)
+  const r = await check.done
+  for (const sig of Object.keys(SIGNALS)) process.off(sig, cancel)
+  const c = readCheck(dir, n, r)
+  const entry = { run: runId, round: n, verdict: c.verdict, action: 'runner', tree, ...c.fields, ...(c.lines.length ? { lines: c.lines } : {}) }
+  const reason = c.verdict === 'OK' ? null : c.verdict === 'FAILED' ? 'the change adds findings' : c.reason
+  const history = [...(readState(dir).gate?.history ?? []), entry]
+  return settle({ round: n, verdict: c.verdict, reason, decidedBy: n, how: 'runner' }, history)
+}
+
+const ACTION = { continue: 'sent back to agy', stop: 'stop allowed', runner: 'checked by the runner after agy exited' }
+
+// The Gates section and meta.gate from the settled verdict and the rounds in state.json. Rounds of
+// earlier executions of the job are listed but never decide.
+function gateOutcome(dir, gate, runId, settled) {
+  if (!gate.configured) return { verdict: 'not configured', head: gate.line, lines: [] }
+  let g = {}
+  try {
+    g = readState(dir).gate ?? {}
   } catch {}
-  if (g?.run !== runId) g = null
-  const history = g?.history ?? []
-  const last = history.at(-1)
-  const verdict = ['OK', 'FAILED'].includes(g?.verdict) ? g.verdict : 'error'
+  const history = g.history ?? []
+  const decided = settled?.decidedBy ? history.find(h => h.run === runId && h.round === settled.decidedBy) : null
+  const verdict = settled?.verdict ?? 'error'
   const counts = h =>
     h?.added == null ? [] : [`${h.added} added, ${h.removed ?? 0} removed${h.outside ? `, ${h.outside} file(s) outside the baseline scope` : ''}`]
-  const rounds = `${g?.round ?? 0} round(s), ${g?.continues ?? 0} sent back`
-  const reason = g?.reason ?? 'no gate check ran in this execution: agy ended without a normal stop'
-  const head = verdict === 'error' ? `GATE ERROR: ${reason} · ${rounds}` : `GATE ${verdict}: ${[...counts(last), rounds].join(' · ')}`
+  const rounds = `${g.round ?? 0} round(s), ${g.continues ?? 0} sent back`
+  const reason = settled?.reason ?? 'the runner could not settle the gate verdict'
+  const head = verdict === 'error' ? `GATE ERROR: ${reason} · ${rounds}` : `GATE ${verdict}: ${[...counts(decided), rounds].join(' · ')}`
+  const final = {
+    matched: `round ${settled?.decidedBy}'s check covers the tree agy left`,
+    runner: `the runner checked the tree agy left in round ${settled?.decidedBy}`,
+    unchecked: 'no check covers the tree agy left',
+  }[settled?.how]
   const lines = [
     `- baseline: ${gate.line}`,
     ...history.map(h => {
-      const parts = [h.verdict, ...counts(h), `${Math.round((h.durationMs ?? 0) / 1000)}s`, h.action === 'continue' ? 'sent back to agy' : 'stop allowed']
-      return `- round ${h.round}: ${parts.join(', ')}`
+      const parts = [h.verdict, ...counts(h), `${Math.round((h.durationMs ?? 0) / 1000)}s`, ACTION[h.action] ?? h.action]
+      return `- round ${h.round}: ${parts.join(', ')}${h.run === runId ? '' : ' (earlier execution)'}`
     }),
-    ...(verdict !== 'OK' && last?.lines?.length ? [verdict === 'FAILED' ? '- still failing:' : '- gate output:', ...indent(last.lines.join('\n'))] : []),
+    ...(final ? [`- ${final}`] : []),
+    ...(verdict !== 'OK' && decided?.lines?.length ? [verdict === 'FAILED' ? '- still failing:' : '- gate output:', ...indent(decided.lines.join('\n'))] : []),
     `- details: ${path.join(dir, 'gate')}/`,
   ]
   const why =
     verdict === 'FAILED'
-      ? `gate FAILED after ${g?.continues ?? 0} round(s) sent back: ${last?.added ?? '?'} finding(s) added${last?.outside ? `, ${last.outside} file(s) outside the baseline scope` : ''}`
+      ? `gate FAILED after ${g.continues ?? 0} round(s) sent back: ${decided?.added ?? '?'} finding(s) added${decided?.outside ? `, ${decided.outside} file(s) outside the baseline scope` : ''}`
       : `gate error: ${reason}`
   // All five fields of `gate check`'s record, so none is left from a check that died after `pending`.
-  const meta = { verdict, added: last?.added ?? 0, removed: last?.removed ?? 0, outside: last?.outside ?? 0, round: last?.round ?? 0, rounds: g?.round ?? 0 }
+  const meta = { verdict, added: decided?.added ?? 0, removed: decided?.removed ?? 0, outside: decided?.outside ?? 0, round: decided?.round ?? 0, rounds: g.round ?? 0 }
   return { verdict, head, lines, why, meta }
 }
 
@@ -473,7 +532,15 @@ async function run(opts) {
     die(EXIT.setup, msg)
   }
   if (mode === 'implement' && !opts.readOnly) {
-    gate = await gateBaseline(dir, cwd, opts['gate-config'])
+    // A rerun in the same job dir keeps the first baseline. A fresh one would take the tree an earlier
+    // execution changed as the reference, and the findings it added would no longer count.
+    const kept = tryJson(path.join(dir, 'gate', 'baseline.json'))
+    if (kept?.configured === false) gate = { configured: false, kept: true, line: 'GATE: not configured (recorded by an earlier execution of this job)' }
+    else if (kept?.complete) {
+      const line = `GATE BASELINE: ${kept.findings?.length ?? 0} finding(s), kept from an earlier execution of this job (${kept.createdAt})`
+      gate = { configured: true, kept: true, line, baseline: kept }
+      log(`gate baseline: ${line}`)
+    } else gate = await gateBaseline(dir, cwd, opts['gate-config'])
     if (gate.error) {
       const output = indent(gate.output)
       setupFailed(`${gate.error}, so agy did not start`, { head: 'GATE ERROR: the baseline could not run', lines: ['- gate output:', ...output] })
@@ -482,8 +549,9 @@ async function run(opts) {
   } else if (opts['gate-config']) log('--gate-config ignored: only implement jobs have a gate')
   let agyDir
   let stateSha
+  let worktree
   try {
-    ;({ agyDir, stateSha } = writeJobConfig({
+    ;({ agyDir, stateSha, worktree } = writeJobConfig({
       dir,
       cwd: realCwd,
       mode,
@@ -500,12 +568,13 @@ async function run(opts) {
 
   // agy's turn limit. With a gate, it also covers ROUND_CAP + 1 Stop hook runs, in case hook time
   // counts against --print-timeout, and the guard allows for them once more in case it doesn't. Both
-  // stay inside MAX_TIMEOUT_S from the runner's start, so the relay's 2 h Bash call outlives the job.
+  // stay inside MAX_TIMEOUT_S from the runner's start, less one check the runner may run after agy
+  // exits, so the relay's 2 h Bash call outlives the job.
   let printS = timeoutS
   let guardS = timeoutS + GUARD_S
   if (gate?.configured) {
     const reserve = (ROUND_CAP + 1) * STOP_TIMEOUT_S
-    const budget = Math.max(60, MAX_TIMEOUT_S - Math.round((Date.now() - started) / 1000))
+    const budget = Math.max(60, MAX_TIMEOUT_S - GATE_DEADLINE_S - Math.round((Date.now() - started) / 1000))
     printS = Math.min(timeoutS + reserve, budget)
     guardS = Math.min(printS + reserve, budget) + GUARD_S
     if (printS < timeoutS + reserve)
@@ -613,7 +682,6 @@ async function run(opts) {
       .filter(s => s?.step_type === 'agent_response')
       .map(s => s.text_delta ?? '')
       .join('')
-    const gates = gate ? gateOutcome(dir, gate, runId) : null
     let exit
     let why
     if (SIGNALS[stopReason]) [exit, why] = [128 + SIGNALS[stopReason], `runner got ${stopReason}; agy was stopped`]
@@ -632,8 +700,21 @@ async function run(opts) {
       const detail = `${result?.error ?? ''}\n${errText}`.trim()
       ;[exit, why] = [classifyError(detail), `agy ${result?.status ?? `exited ${code}`}: ${detail.split('\n')[0] || 'no detail'}`]
     } else if (!result.response?.trim()) [exit, why] = [EXIT.empty, 'agy reported success with an empty answer']
-    else if (gates && gates.verdict !== 'OK' && gates.verdict !== 'not configured') [exit, why] = [EXIT.gate, gates.why]
     else [exit, why] = [EXIT.ok, 'agy finished']
+
+    let gates = null
+    if (gate) {
+      let settled = null
+      if (gate.configured) {
+        try {
+          settled = await settleGate(dir, worktree, runId, exit === EXIT.ok)
+        } catch (error) {
+          log(`gate: could not settle the verdict: ${error.message}`)
+        }
+      }
+      gates = gateOutcome(dir, gate, runId, settled)
+      if (exit === EXIT.ok && !['OK', 'not configured'].includes(gates.verdict)) [exit, why] = [EXIT.gate, gates.why]
+    }
 
     const answer = result?.response?.trim() ? result.response : said
     const { text: shown, dropped } = dropWaitingLines(answer)
