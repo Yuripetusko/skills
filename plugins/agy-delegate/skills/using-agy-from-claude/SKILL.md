@@ -278,8 +278,8 @@ come from the current checkout, not from the PR's head.
   `/agents` preflight does not catch that. The `init` event lists every tool even when the agent has
   a `tools` allowlist.
 - The `Stop` hook fires at the final answer (`terminationReason` `NO_TOOL_CALL`) and also mid-job at
-  a `wait` step (`TERMINAL_STEP_TYPE`), after which agy carries on. A mid-job stop's hook time showed
-  up in the result's `duration_seconds`; the final stop's did not.
+  a `wait` step (`TERMINAL_STEP_TYPE`), after which agy carries on. In one run, a mid-job stop's hook
+  time showed up in the result's `duration_seconds` and the final stop's did not.
 - A `PreToolUse` deny holds under `--dangerously-skip-permissions`. The step ends in state ERROR and
   the model sees the reason. Empty output, a crash or a timeout also deny. The stream carries no
   hook events, which is why the hooks write `hook.log`.

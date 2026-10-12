@@ -361,7 +361,7 @@ async function gateBaseline(dir, cwd, configPath) {
 // The gate verdict of this execution, from the rounds stop.mjs recorded in state.json. Only a round
 // with this execution's run id counts, and anything but OK fails the job.
 function gateOutcome(dir, gate, runId) {
-  if (!gate.configured) return { verdict: 'not configured', head: `${gate.line} (no gate config for this checkout)`, lines: [] }
+  if (!gate.configured) return { verdict: 'not configured', head: gate.line, lines: [] }
   let g = null
   try {
     g = readState(dir).gate
