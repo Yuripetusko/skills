@@ -71,13 +71,33 @@ export function readMeta(dir) {
   if (meta.status === 'running' && !alive(meta.pid)) meta.status = 'lost'
   return { ...meta, dir }
 }
+// Every writer reads, merges and writes under a per-job lock, so overlapping writers (exec, wt-finish,
+// gate check, the stop gate) cannot drop each other's fields. `patch` is an object, or a function
+// that gets the current meta and returns the object to merge: use the function to change a nested
+// field (meta.gate) from its fresh value. After 10 s without the lock the write goes ahead unlocked.
+function lockMeta(dir) {
+  const name = `meta-${createHash('sha256').update(path.resolve(dir)).digest('hex').slice(0, 16)}`
+  const deadline = Date.now() + 10_000
+  let lock
+  while ((lock = takeLock(name, 'meta.json')).busy) {
+    if (Date.now() > deadline) return null
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+  }
+  return lock
+}
 export function updateMeta(dir, patch) {
-  const file = path.join(dir, 'meta.json')
-  const next = { ...(readJson(file) ?? {}), ...patch }
-  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
-  fs.writeFileSync(tmp, JSON.stringify(next, null, 2))
-  fs.renameSync(tmp, file)
-  return next
+  const lock = lockMeta(dir)
+  try {
+    const file = path.join(dir, 'meta.json')
+    const current = readJson(file) ?? {}
+    const next = { ...current, ...(typeof patch === 'function' ? patch(current) : patch) }
+    const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify(next, null, 2))
+    fs.renameSync(tmp, file)
+    return next
+  } finally {
+    if (lock) fs.rmSync(lock.dir, { recursive: true, force: true })
+  }
 }
 function allJobs() {
   if (!fs.existsSync(ROOT)) return []
@@ -152,7 +172,12 @@ function takeLock(name, owner) {
     } catch (e) {
       if (e.code !== 'EEXIST') throw e
       const held = readJson(path.join(dir, 'owner.json'))
-      const young = Date.now() - fs.statSync(dir).mtimeMs < 60_000
+      let young
+      try {
+        young = Date.now() - fs.statSync(dir).mtimeMs < 60_000
+      } catch {
+        continue // released between the failed mkdir and the stat: take it
+      }
       if (held ? alive(held.pid) : young) return { busy: held?.owner ?? 'another process' }
       fs.rmSync(dir, { recursive: true, force: true })
     }
@@ -240,7 +265,8 @@ function cmdJobs(args) {
     const took = j.endedAt ? `took ${dur(start, j.endedAt)}` : `${j.status} for ${dur(start)}`
     const exit = j.exitCode != null ? ` exit ${j.exitCode}` : ''
     const scope = j.scope ? `  scope ${j.scope === 'ok' ? 'OK' : 'VIOLATION'}${j.commit ? ` · commit ${j.commit}` : ''}` : ''
-    console.log(`${j.id}  ${j.endedAt ? j.status + exit + '  ' : ''}${took}${scope}  ${j.label ?? ''}`.trimEnd())
+    const gate = j.gate?.verdict ? `  gate ${j.gate.verdict}` : ''
+    console.log(`${j.id}  ${j.endedAt ? j.status + exit + '  ' : ''}${took}${scope}${gate}  ${j.label ?? ''}`.trimEnd())
     console.log(`    ${home(j.cwd)}${j.branch ? ` (${j.branch})` : ''}  ${lastLine(j) ?? ''}`.trimEnd())
   }
   console.log(`\nProgress: node ${home(path.join(ROOT, 'jobs.mjs'))} tail <job>   Stop: … cancel <job>`)
