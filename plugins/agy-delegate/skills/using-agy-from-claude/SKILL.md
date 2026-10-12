@@ -148,9 +148,11 @@ them in the saved brief, where agy sees `paths:` too.
   silenced one type error with `@ts-expect-error`. pro-high used 84% more tokens and about 10 more
   minutes. Pass whatever the brief names; the runner checks it against `agy models` (exit 14 lists
   the valid ones).
-- **Effort.** The model id carries it. agy's `--effort` works only with a bare family id such as
-  `gemini-3.8-flash`, which `agy models` doesn't list. With a suffixed id agy exits with "conflicts",
-  and flash rejects `xhigh` and `max`. The runner has no effort option.
+- **Effort.** The model id carries it. On agy 1.3.3, `gemini-3.8-flash-medium --effort high` exited
+  with "conflicts". The bare family id `gemini-3.8-flash` took `--effort high`, but `agy models`
+  doesn't list it, so the runner rejects it. Asked for `xhigh` on that id, agy listed `low`, `medium`
+  and `high`. A suffix with its matching effort, and `max`, were not tried. The runner has no effort
+  option.
 - **Timeout.** Default `30m`, capped at `110m`, so agy stops before the 2 h Bash limit.
 
 ## 3. Implement mode: prepare the worktree
