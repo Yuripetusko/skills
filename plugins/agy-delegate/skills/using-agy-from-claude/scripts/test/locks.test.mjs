@@ -122,6 +122,22 @@ describe('takeLock', () => {
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(lockDir('paused.takeover'), 'owner.json'), 'utf8')), newGuard)
   })
 
+  test('a live taker paused under its guard for more than 10 s keeps it: no other taker gets in', () => {
+    const stale = { owner: 'old job', pid: deadPid(), token: 'old' }
+    plant('stalled', stale)
+    let inner
+    // While the outer taker is paused, its guard ages past 10 s and a second taker tries the same lock.
+    const beforeMove = () => {
+      age(lockDir('stalled.takeover'), 30)
+      inner = takeLock('stalled', 'inner')
+    }
+    const outer = takeLock('stalled', 'outer', { beforeMove })
+    assert.deepEqual(inner, { busy: 'another process' })
+    assert.equal(outer.dir, lockDir('stalled'))
+    assert.equal(readOwner('stalled').owner, 'outer')
+    assert.deepEqual(leftovers('stalled'), [])
+  })
+
   test('a stale lock replaced by a live one under the guard is not moved', () => {
     plant('replaced', { owner: 'old job', pid: deadPid(), token: 'old' })
     const live = { owner: 'live job', pid: process.pid, token: 'live' }
