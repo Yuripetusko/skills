@@ -153,3 +153,30 @@ A baseline that could not run makes every later `check` exit 2.
 
 Each command result records `id`, `argv`, `cwd`, `status`, `signal`, `durationMs`, `stderrTail`,
 `error` and the number of findings, so a slow or broken gate shows up in the job dir.
+
+## The verdict in meta.json
+
+`check` records its verdict in the job's `meta.json`, and `delegate-jobs jobs` shows it as
+`gate <verdict>` after the scope verdict:
+
+```json
+"gate": { "verdict": "OK", "added": 0, "removed": 0, "outside": 0, "round": 1 }
+```
+
+| Field            | Meaning |
+| ---------------- | ------- |
+| `verdict`        | `pending` while a check runs, then `OK`, `FAILED`, `error` or `not configured` |
+| `added`, `removed` | Findings added and removed since the baseline |
+| `outside`        | Changed files outside the baseline scope. A `FAILED` with `added: 0` and `outside` above 0 failed on those files alone |
+| `round`          | The round of the check |
+
+A check writes `pending` before it starts and its outcome when it ends, so an `OK` from an earlier
+round never outlives a later check that did not finish. A check that throws, or gets SIGINT, SIGTERM
+or SIGHUP, records `error`. One that is killed outright (SIGKILL) stays `pending`. `baseline` records
+nothing.
+
+Other writers add fields to the same object (the stop gate adds `rounds`). `check` keeps them and
+sets only the five above. Every `meta.json` writer takes a per-job lock around its read, merge and
+write, so overlapping writers do not drop each other's fields. `updateMeta(dir, patch)` in `jobs.mjs`
+takes an object or a function `meta => patch`. Change a nested field such as `gate` with the
+function, which sees the value under the lock.
