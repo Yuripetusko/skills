@@ -79,7 +79,9 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   `<dir>/verifier/input-<n>/`, its verdict in `<dir>/verifier/result-<n>.json`, and its hook
   decisions in `hook.log` with `role: verifier`. It checks conventions, not a full review: the
   caller still reviews the change. It took 62 to 118 s on small diffs, 264 s once live, and 56 to
-  351 s on a 25-file diff. Its `--print-timeout` is 420 s.
+  351 s on a 25-file diff. The gate check and the verifier share 1020 s per round, so the verifier's
+  `--print-timeout` is what the check left, minus a 30 s kill margin, and at least 420 s: 866 s
+  after a 124 s check.
 - agy also stops mid-job, for example at a `wait` step while its own commands run. When the Stop
   input says `fullyIdle: false`, the hook runs no check and spends no round.
 - Each check records the git tree it checked. After agy exits, the runner takes a verdict only from
@@ -94,8 +96,8 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   verifier's model, and the findings still open. `meta.json` keeps the verdict, the rounds and the
   verifier's verdict in `gate`.
 - Without a config the report says `GATE: not configured`, and nothing is checked.
-- agy's `--print-timeout` gets 72 extra minutes for gate rounds (4 Stop hooks at 1080 s: a 570 s
-  check, a 450 s verifier run and 60 s for the diff). It is capped so the runner ends within 110
+- agy's `--print-timeout` gets 72 extra minutes for gate rounds (4 Stop hooks at 1080 s: 1020 s
+  for the check and the verifier, and 60 s for the diff). It is capped so the runner ends within 110
   minutes of its start, its own check and verifier run after agy exits included, and so the runner's
   kill timer allows at least one whole Stop hook run past `--print-timeout`. The cap applies to every
   job with a gate, at about 73 minutes. Whether hook time counts against `--print-timeout` is not

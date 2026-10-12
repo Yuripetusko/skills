@@ -9,7 +9,20 @@ import os from 'node:os'
 import path from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { GATE_DEADLINE_S, progress, ROUND_CAP, runTimeouts, stateHash, STOP_TIMEOUT_S, VERIFIER_DEADLINE_S, writeState } from '../hooks/job.mjs'
+import {
+  GATE_DEADLINE_S,
+  progress,
+  ROUND_BUDGET_S,
+  ROUND_CAP,
+  runTimeouts,
+  stateHash,
+  STOP_TIMEOUT_S,
+  VERIFIER_DEADLINE_S,
+  VERIFIER_PRINT_S,
+  verifierDeadlineS,
+  verifierPrintS,
+  writeState,
+} from '../hooks/job.mjs'
 import { runVerifier, writeVerifierConfig } from '../hooks/verifier.mjs'
 
 const HERE = path.dirname(fileURLToPath(import.meta.url))
@@ -246,6 +259,17 @@ test('runTimeouts: the guard allows a whole Stop hook run past --print-timeout, 
   assert.deepEqual(runTimeouts({ timeoutS: 1800, gate: false, maxS, graceS }), { printS: 1800, guardS: 1920, capped: false })
 })
 
+test('verifierPrintS: the verifier gets what the gate check left of the round budget, at least 420 s', () => {
+  // The trial's 25-file round: a 124 s check, then a 351 s verifier run against a fixed 420 s.
+  assert.equal(verifierPrintS(124), 866)
+  assert.equal(verifierPrintS(0), ROUND_BUDGET_S - 30)
+  for (const spentS of [0, 1.5, 124, 370, GATE_DEADLINE_S]) assert.ok(spentS + verifierDeadlineS(verifierPrintS(spentS)) <= ROUND_BUDGET_S, `${spentS}`)
+  assert.equal(verifierPrintS(GATE_DEADLINE_S + 20), VERIFIER_PRINT_S)
+  // The Stop hook's timeout and the runner's reserve still hold one check and one verifier run.
+  assert.equal(ROUND_BUDGET_S, GATE_DEADLINE_S + VERIFIER_DEADLINE_S)
+  assert.equal(STOP_TIMEOUT_S, ROUND_BUDGET_S + 60)
+})
+
 test('a verifier run or a job without a gate leaves stop.mjs inert', () => {
   for (const env of [{ AGY_DELEGATE_ROLE: 'verifier', AGY_DELEGATE_GATE: '1' }, { AGY_DELEGATE_GATE: '' }]) {
     const r = spawnSync(process.execPath, [STOP], {
@@ -380,13 +404,16 @@ test('verifier FAIL goes back to agy with its findings, and a PASS in the next r
   assert.equal(runs[0].cwd, ctx.repo)
   assert.equal(runs[0].role, 'verifier')
   const args = runs[0].args.join(' ')
+  const result = JSON.parse(fs.readFileSync(path.join(ctx.job, 'verifier', 'result-1.json'), 'utf8'))
   assert.match(args, new RegExp(`--add-dir ${path.join(ctx.job, 'agy-verifier')} --agent delegate-verifier --json-schema \\S+delegate-verifier\\.schema\\.json`))
-  assert.match(args, /--model gemini-3\.8-flash-medium .*--print-timeout 420s/)
+  // The fake gate check takes about a second, so the verifier gets nearly the whole round budget.
+  const printS = Number(/--model gemini-3\.8-flash-medium .*--print-timeout (\d+)s/.exec(args)?.[1])
+  assert.ok(printS > 900 && printS <= ROUND_BUDGET_S - 30, args)
+  assert.equal(result.printS, printS)
   assert.ok(!runs[0].args.includes(path.join(ctx.job, 'agy')), 'the verifier must not load the implementer config')
   const input = path.join(ctx.job, 'verifier', 'input-1')
   assert.deepEqual(fs.readdirSync(input).sort(), ['brief.md', 'checklist.md', 'diff-numbered.txt', 'diff.patch', 'files.json', 'rules.json'])
   assert.match(fs.readFileSync(path.join(input, 'diff-numbered.txt'), 'utf8'), /pkg\/src\/b\.ts/)
-  const result = JSON.parse(fs.readFileSync(path.join(ctx.job, 'verifier', 'result-1.json'), 'utf8'))
   assert.equal(result.verdict, 'FAIL')
   assert.equal(result.findings[0].rule, 'SAFETY comments are true')
 })
