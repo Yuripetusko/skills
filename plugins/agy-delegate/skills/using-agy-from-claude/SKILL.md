@@ -151,6 +151,10 @@ them in the saved brief, where agy sees `paths:` too.
   silenced one type error with `@ts-expect-error`. pro-high used 84% more tokens and about 10 more
   minutes. Pass whatever the brief names; the runner checks it against `agy models` (exit 14 lists
   the valid ones).
+- **Argon.** `gemini-4-argon-low|medium|high` (Gemini 4 Argon) showed up in `agy models` by
+  2026-10-19. The delegating agent names it for code reviews and general handoffs, and Flash stays
+  the default for mechanical work. That split is Yuri's judgement; no trial has measured Argon yet.
+  The gate's verifier stays on `gemini-3.8-flash-medium` whatever model the brief names.
 - **Effort.** The model id carries it. On agy 1.3.3, `gemini-3.8-flash-medium --effort high` exited
   with "conflicts". The bare family id `gemini-3.8-flash` took `--effort high`, but `agy models`
   doesn't list it, so the runner rejects it. Asked for `xhigh` on that id, agy listed `low`, `medium`
