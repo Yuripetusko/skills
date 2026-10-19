@@ -153,7 +153,8 @@ them in the saved brief, where agy sees `paths:` too.
   the valid ones).
 - **Argon.** `gemini-4-argon-low|medium|high` (Gemini 4 Argon) showed up in `agy models` by
   2026-10-19. The delegating agent names it for code reviews and general handoffs, and Flash stays
-  the default for mechanical work. That split is Yuri's judgement; no trial has measured Argon yet.
+  the default for mechanical work. `gemini-4-argon-medium` is the recommended tier; `-high` only on
+  request. That split is Yuri's judgement; no trial has measured Argon yet.
   The gate's verifier stays on `gemini-3.8-flash-medium` whatever model the brief names.
 - **Effort.** The model id carries it. On agy 1.3.3, `gemini-3.8-flash-medium --effort high` exited
   with "conflicts". The bare family id `gemini-3.8-flash` took `--effort high`, but `agy models`
