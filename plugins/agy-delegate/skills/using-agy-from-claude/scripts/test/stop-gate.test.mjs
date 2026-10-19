@@ -875,3 +875,45 @@ test('tail --next -f --every prints the gate lines as they happen and condenses 
   // The one-minute summary is not due, so agy's own steps are not printed.
   assert.ok(!lines.some(l => /^write_to_file/.test(l)), lines.join('\n'))
 })
+
+test('tail --next takes an open job the relay created just before the watch, one job per watch', async () => {
+  const jobs = path.join(fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'tail-next-'))), 'jobs')
+  const writeMeta = (id, meta) => {
+    fs.mkdirSync(path.join(jobs, id), { recursive: true })
+    fs.writeFileSync(path.join(jobs, id, 'meta.json'), JSON.stringify({ id, tool: 'agy', cwd: jobs, ...meta }))
+  }
+  const secondsAgo = s => new Date(Date.now() - s * 1000).toISOString()
+  writeMeta('agy-stale', { status: 'created', createdAt: secondsAgo(600) })
+  writeMeta('agy-done', { status: 'completed', exitCode: 0, createdAt: secondsAgo(30) })
+  writeMeta('agy-first', { status: 'created', createdAt: secondsAgo(20) })
+  writeMeta('agy-second', { status: 'created', createdAt: secondsAgo(10) })
+  const watch = () => {
+    const child = spawn(process.execPath, [JOBS, 'tail', '--next', '-f'], { env: { ...process.env, DELEGATE_JOBS_DIR: jobs }, stdio: ['ignore', 'pipe', 'inherit'] })
+    const killer = setTimeout(() => child.kill(), 15_000)
+    let stdout = ''
+    child.stdout.setEncoding('utf8')
+    // A watch that never attaches is killed, so the test fails instead of hanging.
+    const attached = new Promise(resolve => {
+      child.stdout.on('data', d => resolve((stdout += d)))
+      child.on('exit', resolve)
+    })
+    const exited = new Promise(resolve => child.on('exit', code => resolve(code))).then(code => {
+      clearTimeout(killer)
+      return { code, lines: stdout.split('\n').filter(Boolean) }
+    })
+    return { attached, exited }
+  }
+  // The second watch starts once the first has claimed the oldest open job, so it takes the next one.
+  const first = watch()
+  await first.attached
+  const second = watch()
+  await second.attached
+  for (const id of ['agy-first', 'agy-second']) writeMeta(id, { status: 'completed', exitCode: 0, createdAt: secondsAgo(5) })
+  const [a, b] = await Promise.all([first.exited, second.exited])
+  assert.equal(a.code, 0)
+  assert.equal(b.code, 0)
+  assert.match(a.lines[0], /^agy-first · created · /, a.lines.join('\n'))
+  assert.equal(a.lines.at(-1), 'agy-first completed (exit 0)')
+  assert.match(b.lines[0], /^agy-second · created · /, b.lines.join('\n'))
+  assert.equal(b.lines.at(-1), 'agy-second completed (exit 0)')
+})

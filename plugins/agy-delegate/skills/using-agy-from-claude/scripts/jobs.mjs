@@ -461,10 +461,22 @@ function lastLine(job) {
 }
 
 // -f keeps following until the job ends and then prints its outcome, so `tail -f` works as an event
-// stream for Claude Code's Monitor tool. --next waits for the next job to start, for a caller that
-// has just dispatched a relay and does not know its job yet. --every <dur> condenses the stream to
-// one summary line per interval, so a watching agent spends little context on it; the gate's progress
-// lines (check and verifier start and result) still come through as they happen.
+// stream for Claude Code's Monitor tool. --next is for a caller that has just dispatched a relay and
+// does not know its job yet. The relay often creates the job before the watch starts, so --next takes
+// the oldest job still open that started up to NEXT_GRACE_MS earlier, or else the next job to start.
+// Each --next watch claims its job, so watches armed for relays dispatched together follow one each.
+// --every <dur> condenses the stream to one summary line per interval, so a watching agent spends
+// little context on it; the gate's progress lines (check and verifier start and result) still come
+// through as they happen.
+const NEXT_GRACE_MS = 2 * 60_000
+function claimForNext(job) {
+  try {
+    fs.writeFileSync(path.join(job.dir, 'tail-next.pid'), String(process.pid), { flag: 'wx' })
+    return true
+  } catch {
+    return false
+  }
+}
 function cmdTail(args) {
   const opt = name => (args.includes(name) ? args[args.indexOf(name) + 1] : null)
   const n = Number(opt('-n')) || 20
@@ -474,13 +486,19 @@ function cmdTail(args) {
   const ref = args.find((a, i) => !a.startsWith('-') && !['-n', '--every'].includes(args[i - 1]))
   const keep = args.includes('-f') || args.includes('--next')
   if (!args.includes('--next')) return follow(resolveJob(ref), n, keep, everyMs)
-  const since = Date.now() - 1000
-  const timer = setInterval(() => {
-    const job = allJobs().find(j => Date.parse(j.createdAt) >= since)
-    if (!job) return
-    clearInterval(timer)
-    follow(job, n, true, everyMs)
-  }, 1000)
+  const started = Date.now()
+  const eligible = j => {
+    const created = Date.parse(j.createdAt)
+    if (created >= started - 1000) return true
+    return created >= started - NEXT_GRACE_MS && ['created', 'running'].includes(j.status)
+  }
+  const take = () => {
+    const job = allJobs().reverse().find(j => eligible(j) && claimForNext(j))
+    if (job) follow(job, n, true, everyMs)
+    return job != null
+  }
+  if (take()) return
+  const timer = setInterval(() => take() && clearInterval(timer), 1000)
 }
 function follow(job, n, keep, everyMs) {
   const clip = l => (l.length > 140 ? `${l.slice(0, 137)}...` : l)

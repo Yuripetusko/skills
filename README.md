@@ -74,7 +74,8 @@ node ~/.claude/delegate-jobs/jobs.mjs cancel <job>
 ```
 
 For the orchestrating session itself, start the Monitor tool on
-`delegate-jobs tail --next -f --every 2m` right after dispatching. It sends one summary line every two
+`delegate-jobs tail --next -f --every 2m` right after dispatching, one watch per relay. It picks up a
+job the relay created up to two minutes before the watch started. It sends one summary line every two
 minutes and then the job's outcome, which keeps the orchestrator's context small. Drop `--every` to
 get every step. An agy job with a gate also prints a few lines per round as its Stop hook starts and
 finishes each lint and type-check run and verifier run, so a long check doesn't look like a stall. The
