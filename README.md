@@ -11,10 +11,26 @@ This repo is a Claude Code plugin marketplace, `Yuripetusko/skills`, with two pl
 - **`agy-delegate`**: `agy-agent` and `agy-implementer`, which hand work to Google Antigravity
   (`agy`, Gemini).
 
-Installation
+### Installation
 
 ```bash
 claude plugin marketplace add Yuripetusko/skills
+```
+
+Then 
+
+```bash
+claude plugin install codex-delegate@yuripetusko-skills && claude plugin install agy-delegate@yuripetusko-skills
+```
+
+### Updating
+
+```bash
+claude plugin marketplace update yuripetusko-skills
+```
+
+```bash
+claude plugin update agy-delegate@yuripetusko-skills && claude plugin update codex-delegate@yuripetusko-skills
 ```
 
 Each subagent is a thin Claude relay (sonnet, low effort). It saves the brief, launches one
