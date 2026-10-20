@@ -4,12 +4,18 @@ Collection of skills that I created or modified based on the existing public ski
 
 ## Delegating to Codex and agy
 
-This repo is a Claude Code plugin marketplace, `yuripetusko-skills`, with two plugins:
+This repo is a Claude Code plugin marketplace, `Yuripetusko/skills`, with two plugins:
 
 - **`codex-delegate`**: `codex-agent`, `codex-implementer` and `codex-advisor`, which hand work to
   OpenAI Codex.
 - **`agy-delegate`**: `agy-agent` and `agy-implementer`, which hand work to Google Antigravity
   (`agy`, Gemini).
+
+Installation
+
+```bash
+claude plugin marketplace add Yuripetusko/skills
+```
 
 Each subagent is a thin Claude relay (sonnet, low effort). It saves the brief, launches one
 background command, and relays the other model's answer verbatim when that command exits. Plugin
