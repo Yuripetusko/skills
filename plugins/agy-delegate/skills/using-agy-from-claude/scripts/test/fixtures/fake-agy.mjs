@@ -52,7 +52,7 @@ function slash(name, data) {
 }
 
 if (argv[0] === 'models') {
-  console.log('Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)')
+  console.log('Fetching available models...\ngemini-3.8-flash-high\tGemini 3.8 Flash (High)\ngemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\ngemini-4-argon-medium\tGemini 4 Argon (Medium)')
   process.exit(0)
 }
 if (argv[0] === '--version') {

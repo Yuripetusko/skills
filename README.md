@@ -60,7 +60,7 @@ do lint and type-check, unless the target repo has a gate config.
 **Lint and type-check gate for agy.** When the target repo commits `.agents/delegate-gate.json`,
 `agy-implementer` records lint and type-check findings before agy starts. A Stop hook checks again
 each time agy tries to finish and sends any new findings back to agy, up to 3 times. Once lint and
-type-check are clean, a second, read-only agy run checks the diff against a fixed checklist (true
+type-check are clean, and unless agy runs on Gemini 4 Argon, a second, read-only agy run checks the diff against a fixed checklist (true
 `SAFETY:` comments, no behaviour change to fit a type, no cast laundering, no copied helpers, kept
 `unknown` return types, no weakened tests) and the repo's `AGENTS.md` files. Its findings go back
 to agy the same way. If findings remain, or the gate or the verifier can't give a verdict, the job

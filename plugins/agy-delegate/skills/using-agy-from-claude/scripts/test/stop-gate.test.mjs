@@ -917,3 +917,19 @@ test('tail --next takes an open job the relay created just before the watch, one
   assert.match(b.lines[0], /^agy-second · created · /, b.lines.join('\n'))
   assert.equal(b.lines.at(-1), 'agy-second completed (exit 0)')
 })
+
+test('a job on Argon gets lint and type-check only: findings still go back, the verifier never runs', () => {
+  const ctx = changed()
+  // A verifier run would FAIL, and its model would not be found: neither may happen.
+  const env = verified('1,0', 'FAIL', { ...logVerifier(ctx), AGY_DELEGATE_VERIFIER_MODEL: 'not-a-model' }).env
+  const r = run(ctx, { args: ['--model', 'gemini-4-argon-medium'], env })
+  assert.equal(r.status, 0, r.report)
+  assert.deepEqual(r.stops.map(a => a.decision), ['continue', 'stop'])
+  assert.equal(verifierRuns(ctx).length, 0)
+  assert.ok(!fs.existsSync(path.join(ctx.job, 'agy-verifier')), 'no verifier config was written')
+  assert.match(r.report, /^## Gates\n- GATE OK: 0 added, 0 removed · 2 round\(s\), 1 sent back\n/)
+  assert.match(r.report, /- round 2: OK, 0 added, 0 removed, \d+s, stop allowed\n/)
+  assert.match(r.report, /- verifier: skipped, agy runs on gemini-4-argon-medium\n/)
+  assert.equal(r.meta.gate.verdict, 'OK')
+  assert.ok(snapshot(ctx).includes('gate round 2: verifier skipped for this model'), snapshot(ctx).join('\n'))
+})
