@@ -156,6 +156,13 @@ them in the saved brief, where agy sees `paths:` too.
   the default for mechanical work. `gemini-4-argon-medium` is the recommended tier; `-high` only on
   request. That split is Yuri's judgement; no trial has measured Argon yet.
   The gate's verifier stays on `gemini-3.8-flash-medium` whatever model the brief names.
+- **Argon run time.** Argon is slow on broad briefs. Of four Argon jobs between 2026-10-19 and 10-21,
+  a one-question research brief took 5 minutes and a PR review 16. The other two hit the 30-minute
+  default and returned partial answers (exit 12): an inventory across four code areas, and
+  clustering 1,604 review comments and checking each cluster against the docs. agy 1.4.3 has no
+  speed setting beyond the effort tier in the model id, so the delegating agent gives Argon one
+  focused step per job: exploration, reasoning, fixes and tests as separate jobs, with independent
+  read-only steps run in parallel. Pass a step's `timeout:` through as given.
 - **Effort.** The model id carries it. On agy 1.3.3, `gemini-3.8-flash-medium --effort high` exited
   with "conflicts". The bare family id `gemini-3.8-flash` took `--effort high`, but `agy models`
   doesn't list it, so the runner rejects it. Asked for `xhigh` on that id, agy listed `low`, `medium`
