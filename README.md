@@ -41,8 +41,8 @@ agents carry the plugin's name, so you dispatch them as `codex-delegate:codex-ag
 | Use                                 | When                                                                          |
 | ----------------------------------- | ----------------------------------------------------------------------------- |
 | A Claude subagent                   | The work needs this session's context or tools, or judgement you want to steer closely |
-| `agy-delegate:agy-implementer`      | A scoped change in a worktree. On the default Gemini 3.8 Flash, fast and cheap: renames, call-site updates, boilerplate, applying a written plan. With `model: gemini-4-argon-medium`, a change that needs judgement |
-| `agy-delegate:agy-agent`            | Code reviews and general handoffs with `model: gemini-4-argon-medium` (say read-only for a review). On the default Flash: quick investigations, research, mechanical chores. agy only hears "another agent launched you, report back at the end" |
+| `agy-delegate:agy-implementer`      | A scoped change in a worktree. On the default Gemini 3.8 Flash, fast and cheap: renames, call-site updates, boilerplate, applying a written plan. With `model: gemini-4-argon-medium`, one small change that needs judgement |
+| `agy-delegate:agy-agent`            | Code reviews and general handoffs with `model: gemini-4-argon-medium` (say read-only for a review), one focused step per job: broad Argon briefs run past the 30-minute default. On the default Flash: quick investigations, research, mechanical chores. agy only hears "another agent launched you, report back at the end" |
 | `codex-delegate:codex-implementer`  | A scoped change that needs real reasoning, in a worktree                      |
 | `codex-delegate:codex-agent`        | Long reasoning-heavy work: planning, root causes, research, hard changes      |
 | `codex-delegate:codex-advisor`      | An independent second opinion: review a diff, challenge a plan. Read-only     |
