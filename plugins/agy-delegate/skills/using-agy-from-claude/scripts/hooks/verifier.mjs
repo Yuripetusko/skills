@@ -25,6 +25,9 @@ const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 export const VERIFIER_AGENT = 'delegate-verifier'
 // flash-high caught the same planted problems in 1.8x the time. AGY_DELEGATE_VERIFIER_MODEL overrides it.
 export const VERIFIER_MODEL = 'gemini-3.8-flash-medium'
+// A job on Argon gets lint and type-check only: the Flash verifier would second-guess a stronger
+// model, and each run adds 1 to 7 minutes to a model that is already slow.
+export const skipsVerifier = model => /argon/.test(model)
 // `finish` carries the --json-schema result. Without it in the list, agy 1.3.3 returned no
 // structured_output and the run took three times as long.
 export const VERIFIER_TOOLS = ['view_file', 'list_dir', 'find_by_name', 'grep_search', 'finish']
@@ -295,7 +298,8 @@ export function verifierLine(v) {
 // result. `deadlineAt` (ms) is when the verifier must be gone: a Stop hook passes its own timeout less
 // HOOK_RESERVE_S, the runner ROUND_BUDGET_S from the round's start. `ctl.stop` ends whichever child
 // runs, for the caller's signal handler. `say(text)` writes the round's progress lines for
-// `delegate-jobs tail`: each start and each result.
+// `delegate-jobs tail`: each start and each result. A null `verifier` skips it: a clean gate check
+// is then the round's verdict.
 export async function checkRound({ dir, worktree, n, verifier, deadlineAt = Date.now() + ROUND_BUDGET_S * 1000, ctl = {}, say = () => {} }) {
   say(`lint and type-check started (stopped after ${GATE_DEADLINE_S}s)`)
   const gate = runGate(['check', '--job', dir, '--round', String(n)], { cwd: worktree, deadlineS: GATE_DEADLINE_S })
@@ -305,6 +309,10 @@ export async function checkRound({ dir, worktree, n, verifier, deadlineAt = Date
   const c = readCheck(dir, n, r)
   say(gateLine(c))
   if (c.verdict !== 'OK') return { ...c, verifier: null }
+  if (!verifier) {
+    say('verifier skipped for this model')
+    return { ...c, verifier: null }
+  }
   const v = await runVerifier({ dir, worktree, n, ...verifier, deadlineAt, ctl, say })
   say(verifierLine(v))
   const lines = findingLines(v)

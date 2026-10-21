@@ -65,8 +65,8 @@ Implement jobs check lint and type-check inside agy's loop when the checkout has
   any changed file outside the baseline's scope, go back to agy with the instruction to fix them
   without suppressing them. agy gets 3 such rounds. If the 4th check still fails, the hook lets agy
   stop and the job exits 17 (`gate`).
-- When the check is clean, the hook runs the verifier: a nested, read-only `agy -p` as the
-  `delegate-verifier` agent on `gemini-3.8-flash-medium`, configured in `<dir>/agy-verifier/`. It
+- When the check is clean and agy does not run on Argon, the hook runs the verifier: a nested,
+  read-only `agy -p` as the `delegate-verifier` agent on `gemini-3.8-flash-medium`, configured in `<dir>/agy-verifier/`. It
   reads the job's numbered diff, the brief, the applicable `AGENTS.md` files and
   [prompts/verifier-checklist.md](prompts/verifier-checklist.md), and returns PASS or FAIL with
   `file:line` findings. Its hook allows only `view_file`, `list_dir`, `find_by_name` and
@@ -155,7 +155,9 @@ them in the saved brief, where agy sees `paths:` too.
   2026-10-19. The delegating agent names it for code reviews and general handoffs, and Flash stays
   the default for mechanical work. `gemini-4-argon-medium` is the recommended tier; `-high` only on
   request. That split is Yuri's judgement; no trial has measured Argon yet.
-  The gate's verifier stays on `gemini-3.8-flash-medium` whatever model the brief names.
+  A job on Argon skips the gate's verifier: a Flash verifier would second-guess a stronger model and
+  add 1 to 7 minutes per round. Lint and type-check still gate it, and the Gates section says
+  `verifier: skipped, agy runs on <model>`. Other models keep the `gemini-3.8-flash-medium` verifier.
 - **Argon run time.** Argon is slow on broad briefs. Of four Argon jobs between 2026-10-19 and 10-21,
   a one-question research brief took 5 minutes and a PR review 16. The other two hit the 30-minute
   default and returned partial answers (exit 12): an inventory across four code areas, and

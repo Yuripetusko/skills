@@ -91,7 +91,10 @@ async function round(raw) {
   // agy leaves, so the runner checks again.
   const tree = snapshotTree(state.worktree, path.join(dir, 'gate'))
   const env = process.env
-  const verifier = { agy: env.AGY_DELEGATE_AGY, model: env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL, run, stateSha: env.AGY_DELEGATE_STATE_SHA }
+  const verifier =
+    env.AGY_DELEGATE_VERIFIER === 'off'
+      ? null
+      : { agy: env.AGY_DELEGATE_AGY, model: env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL, run, stateSha: env.AGY_DELEGATE_STATE_SHA }
   const c = await checkRound({ dir, worktree: state.worktree, n, verifier, deadlineAt: verifierDeadlineAt, say })
   const fields = { tree: coveredTree(c, tree), ...c.fields, ...(c.verifier ? { verifier: verifierSummary(c.verifier) } : {}), ...(c.lines.length ? { lines: c.lines } : {}) }
   if (c.verdict === 'OK') {

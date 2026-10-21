@@ -16,7 +16,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { snapshotTree } from './gate.mjs'
 import { CANARY, isQuotaError, progress, readHookLog, readState, ROUND_CAP, runGate, runTimeouts, STOP_TIMEOUT_S, stateHash, writeState } from './hooks/job.mjs'
-import { checkRound, coveredTree, VERIFIER_AGENT, VERIFIER_MODEL, verifierSummary, writeVerifierConfig } from './hooks/verifier.mjs'
+import { checkRound, coveredTree, skipsVerifier, VERIFIER_AGENT, VERIFIER_MODEL, verifierSummary, writeVerifierConfig } from './hooks/verifier.mjs'
 import { updateMeta } from './jobs.mjs'
 
 const SKILL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
@@ -422,7 +422,8 @@ const ACTION = { continue: 'sent back to agy', stop: 'stop allowed', runner: 'ch
 
 // The Gates section and meta.gate from the settled verdict and the rounds in state.json. Rounds of
 // earlier executions of the job are listed but never decide.
-function gateOutcome(dir, gate, runId, settled, verifierBlocked = 0) {
+// `skippedFor` names the agy model when the verifier was skipped for it.
+function gateOutcome(dir, gate, runId, settled, verifierBlocked = 0, skippedFor = null) {
   if (!gate.configured) return { verdict: 'not configured', head: gate.line, lines: [] }
   let g = {}
   try {
@@ -458,6 +459,7 @@ function gateOutcome(dir, gate, runId, settled, verifierBlocked = 0) {
       return [line, ...indent((sent.length > 10 ? [...sent.slice(0, 9), `... and ${sent.length - 9} more`] : sent).join('\n')).filter(l => l.trim())]
     }),
     ...(final ? [`- ${final}`] : []),
+    ...(skippedFor ? [`- verifier: skipped, agy runs on ${skippedFor}`] : []),
     ...(verifierRuns.length
       ? [`- verifier: ${verifierRuns.at(-1).verifier.model}, ${verifierRuns.length} run(s) of ${verifierRuns.map(h => `${Math.round((h.verifier.durationMs ?? 0) / 1000)}s`).join(', ')}`]
       : []),
@@ -575,9 +577,11 @@ async function run(opts) {
     if (real(recorded) !== real(here))
       setupFailed(`the job was created in ${recorded}, but the runner runs in ${here}; create it with \`jobs.mjs new\` in this checkout`)
   }
-  // The verifier runs in implement jobs with a gate, after each clean gate check.
+  // The verifier runs in implement jobs with a gate, after each clean gate check, unless agy runs on
+  // a model that skips it.
   const verifierModel = process.env.AGY_DELEGATE_VERIFIER_MODEL || VERIFIER_MODEL
-  if (mode === 'implement' && !opts.readOnly && !models.includes(verifierModel))
+  const verifierOn = !skipsVerifier(model)
+  if (mode === 'implement' && !opts.readOnly && verifierOn && !models.includes(verifierModel))
     die(EXIT.model, `verifier model "${verifierModel}" is not in \`agy models\`: ${models.join(', ')}`)
   if (mode === 'implement' && !opts.readOnly) {
     // A rerun in the same job dir keeps the first baseline. A fresh one would take the tree an earlier
@@ -613,7 +617,7 @@ async function run(opts) {
   }
   const problem = checkJobConfig(agy, cwd, agyDir, agent, ['PreToolUse', 'PreInvocation', ...(gate?.configured ? ['Stop'] : [])])
   if (problem) setupFailed(`job rules did not load: ${problem}`)
-  if (gate?.configured) {
+  if (gate?.configured && verifierOn) {
     let verifierDir
     try {
       verifierDir = writeVerifierConfig(dir, { model: verifierModel, worktree })
@@ -673,6 +677,7 @@ async function run(opts) {
       // stop.mjs runs the verifier with the same agy binary.
       AGY_DELEGATE_AGY: agy,
       AGY_DELEGATE_VERIFIER_MODEL: verifierModel,
+      AGY_DELEGATE_VERIFIER: verifierOn ? '' : 'off',
     },
     stdio: [fs.openSync(input, 'r'), fs.openSync(eventsFile, 'a'), fs.openSync(agyErr, 'a')],
   })
@@ -772,13 +777,14 @@ async function run(opts) {
       let settled = null
       if (gate.configured) {
         try {
-          settled = await settleGate(dir, worktree, runId, exit === EXIT.ok, { agy, model: verifierModel, run: runId, stateSha })
+          const verifier = verifierOn ? { agy, model: verifierModel, run: runId, stateSha } : null
+          settled = await settleGate(dir, worktree, runId, exit === EXIT.ok, verifier)
         } catch (error) {
           log(`gate: could not settle the verdict: ${error.message}`)
         }
       }
       const verifierBlocked = readHookLog(dir).filter(e => e.run === runId && e.role === 'verifier' && e.decision === 'deny').length
-      gates = gateOutcome(dir, gate, runId, settled, verifierBlocked)
+      gates = gateOutcome(dir, gate, runId, settled, verifierBlocked, verifierOn ? null : model)
       if (exit === EXIT.ok && !['OK', 'not configured'].includes(gates.verdict)) [exit, why] = [gates.quota ? EXIT.quota : EXIT.gate, gates.why]
     }
 
