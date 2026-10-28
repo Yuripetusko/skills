@@ -14,6 +14,18 @@
       "name": "agy-delegate",
       "source": "./plugins/agy-delegate",
       "description": "Subagents that hand work to Google Antigravity (agy, Gemini) as a background job: agy-agent, agy-implementer."
+    },
+    {
+      "name": "spec-stack",
+      "source": "./",
+      "description": "Spec-driven engineering workflow bundling to-implementation-plan, to-adr, orchestrate-implementation-team, implement-next-ticket, and consolidate skills.",
+      "skills": [
+        "./skills/to-implementation-plan",
+        "./skills/to-adr",
+        "./skills/orchestrate-implementation-team",
+        "./skills/implement-next-ticket",
+        "./skills/consolidate"
+      ]
     }
   ]
 }
