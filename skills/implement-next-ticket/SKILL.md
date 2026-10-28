@@ -11,7 +11,7 @@ argument-hint: '[specs/<scope> | path to a ticket, SPEC.md or MAP.md | scope nam
 # Implement next ticket
 
 One ticket, this session, in this checkout. No worktree, no branch switching, no merging: you work
-where the user works, and the user commits unless they ask you to.
+where the user works, and commit the ticket's change once it is done.
 
 ## Locate the plan
 
@@ -66,8 +66,10 @@ it. Stop with a pointer to `/to-implementation-plan` when `SPEC.md`, `tickets/`,
    one-line outcome gist on the ticket's MAP.md entry, `Next up:` pointing at the next frontier
    ticket. `<dashboard>`.
 
-10. **Hand off.** Report the ticket, paths landed, unverified items, leftovers, the next frontier
-    ticket, and every open dashboard question with the default you took.
+10. **Hand off.** Commit and push. When the branch has no PR yet, open one ready for review
+    (`gh pr create` without `--draft`) with no reviewers assigned; on the default branch, commit
+    only and say so. Report the PR URL, the ticket, paths landed, unverified items, leftovers, the
+    next frontier ticket, and every open dashboard question with the default you took.
 
 ## One ticket per session
 

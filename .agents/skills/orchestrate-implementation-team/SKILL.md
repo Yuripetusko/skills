@@ -63,6 +63,12 @@ Validate, and stop with a pointer to `/to-implementation-plan` when anything is 
 - One merger at a time; mergers work in the main checkout on the PR branch.
 - At most three implementers in flight unless the user raises the cap; each worktree costs a full
   `pnpm install`.
+- PR state follows who builds the branch. Agents that all contribute to one shared branch, as
+  in this skill, hand in drafts: implementers commit to their worktree branches and never open a
+  PR (if one does, it is a draft into the PR branch), and a merger verifies each solution, checks
+  for conflicts and merges it. The shared PR is a draft until step 11. When agents each produce an
+  independent or stacked PR instead, open every one ready for review (`gh pr create` without
+  `--draft`), with no reviewers assigned.
 - Stop only processes you started. Never kill dev servers by pattern.
 - A fresh worktree has no `node_modules` and no `.env.*.local` files. `pnpm setup-worktree` needs
   1Password and is not for subagents; the implementer prompt tells them what to copy instead.
@@ -82,9 +88,10 @@ Validate, and stop with a pointer to `/to-implementation-plan` when anything is 
 
 3. **Branch and draft PR.** On the default branch, create `feat/<scope>` (`fix/` or `chore/`
    when the spec says so); on any other branch, use it as the PR branch unless the user objects.
-   Commit `specs/<scope>/` if it is not committed yet (mergers stop on a dirty checkout), push, and open a draft PR with
-   `gh pr create --draft`. Conventional-commit title, body that links `specs/<scope>/SPEC.md` and
-   `MAP.md` by path, no test plan, ending with
+   Commit `specs/<scope>/` if it is not committed yet (mergers stop on a dirty checkout), push,
+   and open a draft PR with `gh pr create --draft`: agents keep contributing to it until step 11.
+   Conventional-commit title, body that links `specs/<scope>/SPEC.md` and `MAP.md` by path, no
+   test plan, ending with
    `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
    **Explore (optional).** When several tickets need the same exploration (a subsystem's shape, a
@@ -129,5 +136,6 @@ echo $?`). Failures go to an implementer as a ticket-shaped prompt (worktree, th
     merged implementer branch deleted.
 
 11. **Announce.** Report the PR URL, tickets landed, leftovers moved and where, what the review
-    changed, and every dashboard question still open with the default you took. Then ask the user whether to mark the PR ready (`gh pr ready`) or leave it a
-    draft for their manual review. The PR stays a draft until they answer.
+    changed, and every dashboard question still open with the default you took. Then ask the user
+    whether to mark the PR ready (`gh pr ready`) or leave it a draft for their manual review. The
+    PR stays a draft until they answer.
