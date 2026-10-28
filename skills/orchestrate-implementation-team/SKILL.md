@@ -65,8 +65,8 @@ Validate, and stop with a pointer to `/to-implementation-plan` when anything is 
   `pnpm install`.
 - PR state follows who builds the branch. Agents that all contribute to one shared branch, as
   in this skill, hand in drafts: implementers commit to their worktree branches and never open a
-  PR (if one does, it is a draft into the PR branch), and a merger verifies each solution, checks
-  for conflicts and merges it. The shared PR is a draft until step 11. When agents each produce an
+  PR (if one does, it is a draft into the PR branch), and a merger merges each branch, resolves
+  conflicts and runs type-check and lint before pushing. The shared PR is a draft until step 11. When agents each produce an
   independent or stacked PR instead, open every one ready for review (`gh pr create` without
   `--draft`), with no reviewers assigned.
 - Stop only processes you started. Never kill dev servers by pattern.
